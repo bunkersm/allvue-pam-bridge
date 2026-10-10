@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Loan Event Bridge</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<link rel="stylesheet" href="src/styles.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="topbar-inner">
+    <div class="brand">
+      <div class="brand-mark" aria-hidden="true">W→P</div>
+      <div><h1>Loan Event Bridge</h1><div class="sub">WSO activity into PAM</div></div>
+    </div>
+    <nav class="tabs" aria-label="Sections">
+      <button class="tab" data-action="view" data-view="queue">Event queue<span class="count" hidden></span></button>
+      <button class="tab" data-action="view" data-view="batches">PAM files<span class="count" hidden></span></button>
+      <button class="tab" data-action="view" data-view="setup">Setup and data</button>
+      <button class="tab" data-action="view" data-view="audit">Audit log</button>
+    </nav>
+    <label class="user" for="user-name">Working as <input type="text" id="user-name" autocomplete="name"></label>
+  </div>
+</header>
+<main id="main"></main>
+<div id="drawer-root"></div>
+<div id="toast" class="toast" role="status" aria-live="polite" hidden></div>
+<script src="src/engine.js"></script>
+<script src="src/sample-data.js"></script>
+<script src="src/app.js"></script>
+</body>
+</html>
