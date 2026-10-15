@@ -46,7 +46,18 @@
     pamImport: ['BatchID', 'Seq', 'EventKey', 'MessageType', 'PAMPortfolio', 'PAMTrancheID', 'PAMContractID',
       'TargetContractRef', 'EffectiveDate', 'Amount', 'BaseRate', 'Tenor', 'MarginBps', 'FloorPct',
       'PayFreq', 'ResetFreq', 'DayCount'],
+    fees: ['WSOPortfolio', 'AssetID', 'AssetName', 'FacilityType', 'FeeType', 'PeriodStart', 'PeriodEnd',
+      'FeeRateBps', 'AverageUnfunded', 'DayCount', 'Amount', 'WSOTransactionID'],
+    pamFeeImport: ['BatchID', 'Seq', 'FeeKey', 'TransactionType', 'FeeType', 'PAMPortfolio', 'PAMTrancheID',
+      'PeriodStart', 'PeriodEnd', 'Amount', 'WSOTransactionID'],
   };
+
+  // A fee may differ from rate x average unfunded x days / basis by the larger of
+  // these before it goes to review: $1.00 or 0.1% of the expected amount.
+  const FEE_TOLERANCE = { cents: 100, share: 0.001 };
+  // PAM's current unfunded position may differ from WSO's average unfunded for the
+  // period by this share before the split by fund is flagged as possibly stale.
+  const FEE_POSITION_DRIFT = 0.10;
 
   // ---------------------------------------------------------------- CSV
 
@@ -522,7 +533,119 @@
     return lines;
   }
 
-  /** Numbers each event's messages into one PAM import file. */
+
+  // ---------------------------------------------------------------- unfunded fees
+
+  function normalizeFees(rows) {
+    return rows.map((r, i) => ({
+      rowNo: i + 2, // header is line 1
+      wsoPortfolio: String(r.WSOPortfolio || '').trim(),
+      assetId: String(r.AssetID || '').trim(),
+      assetName: String(r.AssetName || r.AssetID || '').trim(),
+      facilityType: String(r.FacilityType || '').trim().toUpperCase(),
+      feeType: String(r.FeeType || '').trim(),
+      periodStart: normalizeDate(r.PeriodStart),
+      periodEnd: normalizeDate(r.PeriodEnd),
+      rateBps: Number(r.FeeRateBps || 0),
+      avgUnfunded: toCents(r.AverageUnfunded),
+      dayCount: String(r.DayCount || '').trim().toUpperCase(),
+      amount: toCents(r.Amount),
+      transactionId: String(r.WSOTransactionID || '').trim(),
+    }));
+  }
+
+  const yearBasis = dayCount => (/365/.test(dayCount) ? 365 : 360);
+
+  /** Fee the export should show: rate x average unfunded x days / basis, in cents. PeriodEnd is inclusive. */
+  function expectedFee(f) {
+    const days = daysBetween(f.periodStart, f.periodEnd) + 1;
+    return { days, expected: Math.round(f.avgUnfunded * (f.rateBps / 10000) * days / yearBasis(f.dayCount)) };
+  }
+
+  /**
+   * Checks each row of a WSO unfunded fee export and splits it across the PAM
+   * portfolios on their current unfunded position in the tranche.
+   */
+  function checkFees(input) {
+    const trancheMap = input.trancheMap || {};
+    const portfolioMap = input.portfolioMap || {};
+    const pamPositions = input.pamPositions || [];
+    const firstRowByKey = new Map();
+    const money = formatMoney;
+
+    const items = input.fees.map(f => {
+      const flags = [];
+      const exception = text => flags.push({ level: 'exception', text });
+      const review = text => flags.push({ level: 'review', text });
+
+      let key = ['FEE', f.wsoPortfolio, f.assetId, f.feeType.toUpperCase(), f.periodStart, f.periodEnd].join('|');
+      if (firstRowByKey.has(key)) {
+        exception(`Same facility, fee type and period as row ${firstRowByKey.get(key)} of the export. Load only one of them.`);
+        key += `|row${f.rowNo}`;
+      } else firstRowByKey.set(key, f.rowNo);
+
+      const { days, expected } = expectedFee(f);
+      const diff = f.amount - expected;
+      const tranche = trancheMap[f.assetId];
+      const pamPortfolios = portfolioMap[f.wsoPortfolio] || [];
+
+      if (!tranche) exception(`Asset ${f.assetId} is not mapped to a PAM tranche. Set the tranche up in PAM and add it to the tranche map.`);
+      if (!pamPortfolios.length) exception(`WSO portfolio ${f.wsoPortfolio} has no PAM portfolios in the portfolio map.`);
+      if (f.facilityType === 'TL') exception('Unfunded fee on a term loan. Term loans have no unfunded commitment, so check the asset or the fee type.');
+      if (days <= 0) exception(`Period end ${f.periodEnd} is before period start ${f.periodStart}.`);
+
+      if (f.amount < 0) {
+        review(`Negative amount of ${money(f.amount)}. Confirm this reverses or corrects an earlier fee before loading it.`);
+      } else if (f.amount === 0) {
+        review('Zero amount. There is nothing to load; reject it unless PAM needs a zero entry.');
+      } else if (Math.abs(diff) > Math.max(FEE_TOLERANCE.cents, Math.abs(expected) * FEE_TOLERANCE.share)) {
+        review(`Amount differs from rate × average unfunded × days by ${money(diff)} (expected ${money(expected)}). Check the rate, the average unfunded or the period against the agent notice.`);
+      }
+
+      let allocationBasis = [];
+      let pamUnfunded = 0;
+      if (tranche && pamPortfolios.length) {
+        allocationBasis = pamPortfolios.map(pp => {
+          const pos = pamPositions.find(p => p.pamPortfolio === pp && p.pamTrancheId === tranche.pamTrancheId);
+          return { pamPortfolio: pp, weight: pos ? pos.unfunded : 0 };
+        });
+        pamUnfunded = allocationBasis.reduce((s, b) => s + b.weight, 0);
+        if (pamUnfunded <= 0) {
+          exception(`No unfunded position in PAM for tranche ${tranche.pamTrancheId} in ${pamPortfolios.join(', ')}, so there is nothing to split the fee on.`);
+        } else if (f.avgUnfunded > 0 && Math.abs(pamUnfunded - f.avgUnfunded) / f.avgUnfunded > FEE_POSITION_DRIFT) {
+          const pct = Math.round(Math.abs(pamUnfunded - f.avgUnfunded) / f.avgUnfunded * 100);
+          review(`PAM unfunded today (${money(pamUnfunded)}) differs from WSO's average unfunded for the period (${money(f.avgUnfunded)}) by ${pct}%. Unfunded changed during the period, so check the split by fund.`);
+        }
+      }
+
+      const weights = allocationBasis.filter(b => b.weight > 0).map(b => ({ key: b.pamPortfolio, weight: b.weight }));
+      const allocation = tranche && weights.length ? allocate(f.amount, weights) : null;
+      const line = { messageType: 'UNFUNDED_FEE', note: f.feeType, amount: f.amount, allocation };
+      const messages = allocation ? weights.map(w => ({
+        FeeKey: key,
+        TransactionType: 'UNFUNDED_FEE',
+        FeeType: f.feeType,
+        PAMPortfolio: w.key,
+        PAMTrancheID: tranche.pamTrancheId,
+        PeriodStart: f.periodStart,
+        PeriodEnd: f.periodEnd,
+        Amount: fromCents(allocation[w.key]),
+        WSOTransactionID: f.transactionId,
+      })) : [];
+
+      const route = flags.some(x => x.level === 'exception') ? 'exception' : flags.length ? 'review' : 'clean';
+      return {
+        kind: 'fee', key, ...f, days, expected, diff, flags, route,
+        pamTrancheId: tranche ? tranche.pamTrancheId : '',
+        pamUnfunded, allocationBasis, lines: [line], messages,
+      };
+    });
+
+    const order = { exception: 0, review: 1, clean: 2 };
+    return items.sort((a, b) => order[a.route] - order[b.route] || a.assetName.localeCompare(b.assetName) || a.rowNo - b.rowNo);
+  }
+
+  /** Numbers each event's (or fee's) messages into one PAM import file. */
   function buildBatchRows(events, batchId) {
     let seq = 0;
     return events.flatMap(ev => ev.messages.map(m => ({ BatchID: batchId, Seq: ++seq, ...m })));
@@ -534,5 +657,6 @@
     toCents, fromCents, formatMoney, normalizeDate, daysBetween,
     normalizeWso, normalizeTrancheMap, normalizePortfolioMap, normalizePamPositions, normalizeLineage,
     allocate, detectEvents, buildBatchRows,
+    FEE_TOLERANCE, FEE_POSITION_DRIFT, normalizeFees, expectedFee, checkFees,
   };
 });

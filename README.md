@@ -35,6 +35,19 @@ npm test
 4. **Review.** Approve or reject each event with a comment. Every decision goes to the audit log.
 5. **PAM file.** Approved events go into a numbered import file. Import it through PAM's import browser, then record which events loaded or failed. Failed events return to review with the PAM error.
 
+## Monthly fees
+
+The **Monthly fees** tab replaces the manual monthly load of unfunded fee transactions.
+
+1. Load the WSO unfunded fee export (one row per facility, fee type and period).
+2. Each fee is checked against rate × average unfunded × days ÷ 360 (or 365). It is **clean** within the larger of $1.00 or 0.1%.
+3. **Review**: amount outside tolerance, negative (correction) or zero amounts, and PAM unfunded today differing from WSO's average unfunded by more than 10% (unfunded changed mid-period, so the split by fund may be off).
+4. **Exceptions**: duplicate rows, fees on term loans, unmapped facilities, no PAM unfunded position.
+5. Fees are split across PAM portfolios on their current **unfunded** position, to the cent.
+6. **Approve all clean fees** in one click, review the rest individually, then create a fee file on **PAM files**.
+
+The sample is a fictional October 2026 export with 13 rows: 7 clean, 3 for review, 3 exceptions.
+
 Every event has a deterministic key (portfolio, asset, effective date, contract IDs), so re-running detection never creates duplicates and keeps decisions already made.
 
 ## Input files
@@ -48,6 +61,7 @@ Load these on **Setup and data** as CSV. Header names must match.
 | Tranche map | `AssetID, PAMTrancheID, FacilityType` |
 | PAM positions | `PAMPortfolio, PAMTrancheID, Funded, Unfunded` |
 | Contract lineage | `WSOContractID, PAMContractID` |
+| WSO unfunded fee export | `WSOPortfolio, AssetID, AssetName, FacilityType, FeeType, PeriodStart, PeriodEnd, FeeRateBps, AverageUnfunded, DayCount, Amount, WSOTransactionID` |
 
 `FacilityType` is `TL`, `RC` or `DDTL`. `ContractType` is `Funded` or `Unfunded` (one unfunded row per RC/DDTL tranche). Dates may be `YYYY-MM-DD` or `M/D/YYYY`.
 
@@ -56,6 +70,8 @@ Load these on **Setup and data** as CSV. Header names must match.
 The output layout in `src/engine.js` (`LAYOUTS.pamImport`) is a **placeholder**:
 
 `BatchID, Seq, EventKey, MessageType, PAMPortfolio, PAMTrancheID, PAMContractID, TargetContractRef, EffectiveDate, Amount, BaseRate, Tenor, MarginBps, FloorPct, PayFreq, ResetFreq, DayCount`
+
+Fee files use `BatchID, Seq, FeeKey, TransactionType, FeeType, PAMPortfolio, PAMTrancheID, PeriodStart, PeriodEnd, Amount, WSOTransactionID` with transaction type `UNFUNDED_FEE`. Also a placeholder.
 
 Message types: `CONTRACT_CHANGE`, `CONTRACT_SPLIT`, `CONTRACT_COMBINE`, `CONTRACT_CLOSE`, `CONTRACT_OPEN`, `PAYDOWN`, `DRAW`. New PAM contracts are referenced as `WSO-<contract id>` until PAM assigns an ID.
 
@@ -71,5 +87,6 @@ Message types: `CONTRACT_CHANGE`, `CONTRACT_SPLIT`, `CONTRACT_COMBINE`, `CONTRAC
 - Replace the WSO column mapping with the real WSO export headers.
 - Replace the PAM layout with the real import message formats, one writer per message type.
 - Add a PAM position extract for next-day reconciliation.
+- Split fees on average daily unfunded per PAM portfolio once a position history is available.
 - Add four-eyes approval (preparer and approver must differ) if required.
 - Move state from browser storage to a shared database when more than one person uses it.

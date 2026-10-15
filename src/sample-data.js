@@ -92,6 +92,45 @@
     { id: 'A1027', name: 'Bramble Foods TLB', port: 'CLO-WSO', fac: 'TL', margin: 400, floor: 0.5,
       prior: [k('3M', 6000000, ['2026-09-15', '2026-12-15'], { id: '418705' })],
       current: [k('3M', 6000000, ['2026-09-15', '2026-12-15'], { id: '418705' })] },
+
+    // ---- Revolvers and delayed draws with no contract activity today; they carry unfunded fees.
+    { id: 'A1028', name: 'Harbor Point Clinics RCF', port: 'LOANS-MASTER', fac: 'RC', margin: 350, floor: 0, commitment: 7500000,
+      unfunded: [7500000, 7500000], prior: [], current: [] },
+    { id: 'A1031', name: 'Summit Lane Dental RCF', port: 'LOANS-MASTER', fac: 'RC', margin: 325, floor: 0, commitment: 12000000,
+      unfunded: [8000000, 8000000],
+      prior: [k('1M', 4000000, ['2026-10-20', '2026-11-20'], { id: '418707' })],
+      current: [k('1M', 4000000, ['2026-10-20', '2026-11-20'], { id: '418707' })] },
+    { id: 'A1033', name: 'Ridgeback Freight RCF', port: 'LOANS-MASTER', fac: 'RC', margin: 375, floor: 0, commitment: 10000000,
+      unfunded: [6000000, 6000000],
+      prior: [k('1M', 4000000, ['2026-10-16', '2026-11-16'], { id: '418708' })],
+      current: [k('1M', 4000000, ['2026-10-16', '2026-11-16'], { id: '418708' })] },
+    { id: 'A1029', name: 'Cobalt Ridge Software RCF', port: 'CLO-WSO', fac: 'RC', margin: 350, floor: 0, commitment: 4000000,
+      unfunded: [2500000, 2500000],
+      prior: [k('1M', 1500000, ['2026-10-09', '2026-11-09'], { id: '418709' })],
+      current: [k('1M', 1500000, ['2026-10-09', '2026-11-09'], { id: '418709' })] },
+    { id: 'A1030', name: 'Meridian Vet Partners DDTL', port: 'CLO-WSO', fac: 'DDTL', margin: 475, floor: 0.75, commitment: 6000000,
+      unfunded: [6000000, 6000000], prior: [], current: [] },
+    { id: 'A1032', name: 'Brightwater Labs RCF', port: 'CLO-WSO', fac: 'RC', margin: 400, floor: 0, commitment: 5000000, unmapped: true,
+      unfunded: [5000000, 5000000], prior: [], current: [] },
+  ];
+
+  // ---- October 2026 unfunded fee export (ACT/360, period end inclusive).
+  const FEE_PERIOD = ['2026-10-01', '2026-10-31'];
+  const feeAmount = (avg, bps) => Math.round(avg * 100 * (bps / 10000) * 31 / 360) / 100;
+  const FEES = [
+    { asset: 'A1008', type: 'Commitment fee', bps: 50, avg: 5000000 },
+    { asset: 'A1009', type: 'Commitment fee', bps: 37.5, avg: 4129032.26 }, // paid down on 10/30, so unfunded rose for 2 days
+    { asset: 'A1011', type: 'Ticking fee', bps: 100, avg: 6870967.74 },     // drew 2,000,000 on 10/30
+    { asset: 'A1018', type: 'Commitment fee', bps: 50, avg: 3000000 },
+    { asset: 'A1018', type: 'Commitment fee', bps: 50, avg: 3000000 },      // duplicate row in the export
+    { asset: 'A1028', type: 'Commitment fee', bps: 50, avg: 7500000 },
+    { asset: 'A1031', type: 'Commitment fee', bps: 50, avg: 8000000, amount: 3555.56 }, // does not match rate x balance
+    { asset: 'A1033', type: 'Commitment fee', bps: 50, avg: 7935483.87 },   // drew 4,000,000 on 10/16
+    { asset: 'A1008', type: 'Commitment fee', bps: 50, avg: 5000000, period: ['2026-09-01', '2026-09-30'], amount: -215.28 }, // correction to September
+    { asset: 'A1003', type: 'Commitment fee', bps: 50, avg: 0, amount: 500, port: 'LOANS-MASTER' }, // fee booked against a term loan
+    { asset: 'A1029', type: 'Commitment fee', bps: 37.5, avg: 2500000 },
+    { asset: 'A1030', type: 'Ticking fee', bps: 75, avg: 6000000 },
+    { asset: 'A1032', type: 'Commitment fee', bps: 50, avg: 5000000 },      // facility not set up in PAM
   ];
 
   const money = n => n.toFixed(2);
@@ -151,6 +190,19 @@
     return rows;
   }
 
+  function feeRows() {
+    let txn = 77000;
+    return FEES.map(f => {
+      const a = ASSETS.find(x => x.id === f.asset && (!f.port || x.port === f.port));
+      const period = f.period || FEE_PERIOD;
+      return {
+        WSOPortfolio: a.port, AssetID: a.id, AssetName: a.name, FacilityType: a.fac, FeeType: f.type,
+        PeriodStart: period[0], PeriodEnd: period[1], FeeRateBps: String(f.bps), AverageUnfunded: money(f.avg),
+        DayCount: 'ACT/360', Amount: money(f.amount ?? feeAmount(f.avg, f.bps)), WSOTransactionID: `FT-${++txn}`,
+      };
+    });
+  }
+
   function lineageRows() {
     const seen = new Set();
     let pc = 20400;
@@ -165,6 +217,7 @@
 
   const SampleData = {
     label: 'Sample month-end (fictional data)',
+    feeLabel: 'October 2026 fee export (fictional data)',
     asOfDate: AS_OF,
     priorAsOfDate: PRIOR_AS_OF,
     build() {
@@ -175,6 +228,7 @@
         portfolioMap: portfolioMapRows(),
         pamPositions: pamPositionRows(),
         lineage: lineageRows(),
+        fees: feeRows(),
       };
     },
   };

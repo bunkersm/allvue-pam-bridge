@@ -117,3 +117,55 @@ test('money parsing handles separators and negatives', () => {
   assert.equal(E.formatMoney(1333333333), '13,333,333.33');
   assert.equal(E.normalizeDate('10/30/2026'), '2026-10-30');
 });
+
+function checkSampleFees(mutate) {
+  const d = SampleData.build();
+  if (mutate) mutate(d);
+  return E.checkFees({
+    fees: E.normalizeFees(d.fees),
+    trancheMap: E.normalizeTrancheMap(d.trancheMap),
+    portfolioMap: E.normalizePortfolioMap(d.portfolioMap),
+    pamPositions: E.normalizePamPositions(d.pamPositions),
+  });
+}
+const feeFor = (fees, assetId, pred = () => true) => fees.find(f => f.assetId === assetId && pred(f));
+
+test('sample fee export produces the expected routes', () => {
+  const fees = checkSampleFees();
+  const count = r => fees.filter(f => f.route === r).length;
+  assert.equal(fees.length, 13);
+  assert.equal(count('clean'), 7);
+  assert.equal(count('review'), 3);
+  assert.equal(count('exception'), 3);
+});
+
+test('expected fee uses rate, average unfunded, inclusive days and day-count basis', () => {
+  const f = { periodStart: '2026-10-01', periodEnd: '2026-10-31', avgUnfunded: 500000000, rateBps: 50, dayCount: 'ACT/360' };
+  assert.deepEqual(E.expectedFee(f), { days: 31, expected: 215278 });
+  assert.equal(E.expectedFee({ ...f, dayCount: 'ACT/365' }).expected, 212329);
+});
+
+test('clean fee splits on PAM unfunded and ties to the cent', () => {
+  const f = feeFor(checkSampleFees(), 'A1028');
+  assert.equal(f.route, 'clean');
+  assert.equal(f.messages.reduce((s, m) => s + E.toCents(m.Amount), 0), f.amount);
+  assert.ok(f.messages.every(m => m.TransactionType === 'UNFUNDED_FEE'));
+});
+
+test('fee checks route mismatches, corrections, duplicates, term loans and unmapped facilities', () => {
+  const fees = checkSampleFees();
+  assert.equal(feeFor(fees, 'A1031').route, 'review');
+  assert.match(feeFor(fees, 'A1031').flags[0].text, /differs from rate/);
+  assert.equal(feeFor(fees, 'A1033').route, 'review');
+  const correction = feeFor(fees, 'A1008', f => f.amount < 0);
+  assert.equal(correction.route, 'review');
+  assert.equal(correction.messages.reduce((s, m) => s + E.toCents(m.Amount), 0), correction.amount);
+  assert.equal(fees.filter(f => f.assetId === 'A1018' && f.route === 'exception').length, 1);
+  assert.equal(feeFor(fees, 'A1003').route, 'exception');
+  assert.equal(feeFor(fees, 'A1032').route, 'exception');
+});
+
+test('fee keys are unique even with duplicate rows', () => {
+  const keys = checkSampleFees().map(f => f.key);
+  assert.equal(new Set(keys).size, keys.length);
+});
