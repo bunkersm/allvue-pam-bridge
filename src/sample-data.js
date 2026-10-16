@@ -3,7 +3,7 @@
  * fictional. Produces the same row layouts as the CSV uploads, so the sample
  * runs through exactly the same path as real files.
  *
- * Scenario: WSO snapshot on 2026-10-29 vs 2026-10-30 (a month-end roll date).
+ * Scenario: AllVue snapshot on 2026-10-29 vs 2026-10-30 (a month-end roll date).
  */
 (function (root) {
   'use strict';
@@ -20,12 +20,12 @@
 
   const PAM_PORTFOLIOS = {
     'LOANS-MASTER': ['FUND-I', 'FUND-II', 'SMA-ALPHA'],
-    'CLO-WSO': ['CLO-2023-1', 'CLO-2024-1'],
+    'CLO-MASTER': ['CLO-2023-1', 'CLO-2024-1'],
   };
   // Each tranche's split across PAM portfolios differs, as it would after trading.
   const SHARE_PATTERNS = {
     'LOANS-MASTER': [[500, 300, 200], [450, 350, 200], [400, 400, 200], [550, 250, 200], [475, 325, 200]],
-    'CLO-WSO': [[600, 400], [500, 500], [650, 350]],
+    'CLO-MASTER': [[600, 400], [500, 500], [650, 350]],
   };
 
   let nextId = 418200;
@@ -77,19 +77,19 @@
       prior: [k('1M', 2000000, ['2026-10-20', '2026-11-20'], { id: '418704' })],
       current: [k('1M', 2000000, ['2026-10-20', '2026-11-20'], { id: '418704' })] },
 
-    // ---- CLO-WSO
-    { id: 'A1003', name: 'Copperline Software TL', port: 'CLO-WSO', fac: 'TL', margin: 350, floor: 0.5,
+    // ---- CLO-MASTER
+    { id: 'A1003', name: 'Copperline Software TL', port: 'CLO-MASTER', fac: 'TL', margin: 350, floor: 0.5,
       prior: [prior('1M', 8000000, { id: '418901' })], current: [next('1M', 8000000, { id: '418951' })] },
-    { id: 'A1019', name: 'Quarry Lane Materials TLB', port: 'CLO-WSO', fac: 'TL', margin: 350, floor: 0.5, ...roll('1M', 4987500) },
-    { id: 'A1020', name: 'Redfern Telecom TL', port: 'CLO-WSO', fac: 'TL', margin: 450, floor: 0.75, ...roll('1M', 6650000) },
-    { id: 'A1021', name: 'Saltmarsh Energy TLB', port: 'CLO-WSO', fac: 'TL', margin: 400, floor: 0.5, ...roll('3M', 5500000) },
-    { id: 'A1022', name: 'Tidewater Marine TLB', port: 'CLO-WSO', fac: 'TL', margin: 425, floor: 0.5,
+    { id: 'A1019', name: 'Quarry Lane Materials TLB', port: 'CLO-MASTER', fac: 'TL', margin: 350, floor: 0.5, ...roll('1M', 4987500) },
+    { id: 'A1020', name: 'Redfern Telecom TL', port: 'CLO-MASTER', fac: 'TL', margin: 450, floor: 0.75, ...roll('1M', 6650000) },
+    { id: 'A1021', name: 'Saltmarsh Energy TLB', port: 'CLO-MASTER', fac: 'TL', margin: 400, floor: 0.5, ...roll('3M', 5500000) },
+    { id: 'A1022', name: 'Tidewater Marine TLB', port: 'CLO-MASTER', fac: 'TL', margin: 425, floor: 0.5,
       prior: [prior('1M', 7000000), prior('1M', 5000000)], current: [next('1M', 4500000), next('3M', 7500000)] },
-    { id: 'A1023', name: 'Umber Analytics TL', port: 'CLO-WSO', fac: 'TL', margin: 375, floor: 0.5, ...roll('1M', 3990000) },
-    { id: 'A1024', name: 'Vantage Clinical TLB', port: 'CLO-WSO', fac: 'TL', margin: 400, floor: 0.5, unmapped: true, ...roll('1M', 4000000) },
-    { id: 'A1025', name: 'Willowbrook Pet TLB', port: 'CLO-WSO', fac: 'TL', margin: 475, floor: 0.75, ...roll('1M', 7231812.5) },
-    { id: 'A1026', name: 'Yarrow Brands TL', port: 'CLO-WSO', fac: 'TL', margin: 350, floor: 0.5, ...roll('3M', 9000000) },
-    { id: 'A1027', name: 'Bramble Foods TLB', port: 'CLO-WSO', fac: 'TL', margin: 400, floor: 0.5,
+    { id: 'A1023', name: 'Umber Analytics TL', port: 'CLO-MASTER', fac: 'TL', margin: 375, floor: 0.5, ...roll('1M', 3990000) },
+    { id: 'A1024', name: 'Vantage Clinical TLB', port: 'CLO-MASTER', fac: 'TL', margin: 400, floor: 0.5, unmapped: true, ...roll('1M', 4000000) },
+    { id: 'A1025', name: 'Willowbrook Pet TLB', port: 'CLO-MASTER', fac: 'TL', margin: 475, floor: 0.75, ...roll('1M', 7231812.5) },
+    { id: 'A1026', name: 'Yarrow Brands TL', port: 'CLO-MASTER', fac: 'TL', margin: 350, floor: 0.5, ...roll('3M', 9000000) },
+    { id: 'A1027', name: 'Bramble Foods TLB', port: 'CLO-MASTER', fac: 'TL', margin: 400, floor: 0.5,
       prior: [k('3M', 6000000, ['2026-09-15', '2026-12-15'], { id: '418705' })],
       current: [k('3M', 6000000, ['2026-09-15', '2026-12-15'], { id: '418705' })] },
 
@@ -104,13 +104,13 @@
       unfunded: [6000000, 6000000],
       prior: [k('1M', 4000000, ['2026-10-16', '2026-11-16'], { id: '418708' })],
       current: [k('1M', 4000000, ['2026-10-16', '2026-11-16'], { id: '418708' })] },
-    { id: 'A1029', name: 'Cobalt Ridge Software RCF', port: 'CLO-WSO', fac: 'RC', margin: 350, floor: 0, commitment: 4000000,
+    { id: 'A1029', name: 'Cobalt Ridge Software RCF', port: 'CLO-MASTER', fac: 'RC', margin: 350, floor: 0, commitment: 4000000,
       unfunded: [2500000, 2500000],
       prior: [k('1M', 1500000, ['2026-10-09', '2026-11-09'], { id: '418709' })],
       current: [k('1M', 1500000, ['2026-10-09', '2026-11-09'], { id: '418709' })] },
-    { id: 'A1030', name: 'Meridian Vet Partners DDTL', port: 'CLO-WSO', fac: 'DDTL', margin: 475, floor: 0.75, commitment: 6000000,
+    { id: 'A1030', name: 'Meridian Vet Partners DDTL', port: 'CLO-MASTER', fac: 'DDTL', margin: 475, floor: 0.75, commitment: 6000000,
       unfunded: [6000000, 6000000], prior: [], current: [] },
-    { id: 'A1032', name: 'Brightwater Labs RCF', port: 'CLO-WSO', fac: 'RC', margin: 400, floor: 0, commitment: 5000000, unmapped: true,
+    { id: 'A1032', name: 'Brightwater Labs RCF', port: 'CLO-MASTER', fac: 'RC', margin: 400, floor: 0, commitment: 5000000, unmapped: true,
       unfunded: [5000000, 5000000], prior: [], current: [] },
   ];
 
@@ -135,7 +135,7 @@
 
   const money = n => n.toFixed(2);
 
-  function wsoRows(side) {
+  function allvueRows(side) {
     const asOf = side === 'prior' ? PRIOR_AS_OF : AS_OF;
     const rows = [];
     ASSETS.forEach(a => {
@@ -143,7 +143,7 @@
       const funded = contracts.reduce((s, c) => s + c.amount, 0);
       const unfunded = a.unfunded ? a.unfunded[side === 'prior' ? 0 : 1] : 0;
       const commitment = a.fac === 'TL' ? funded : a.commitment;
-      const base = { AsOfDate: asOf, WSOPortfolio: a.port, AssetID: a.id, AssetName: a.name, FacilityType: a.fac, Commitment: money(commitment) };
+      const base = { AsOfDate: asOf, AllVuePortfolio: a.port, AssetID: a.id, AssetName: a.name, FacilityType: a.fac, Commitment: money(commitment) };
       contracts.forEach(c => rows.push({
         ...base, ContractID: c.id, ContractType: 'Funded', StartDate: c.period[0], EndDate: c.period[1],
         Amount: money(c.amount), BaseRate: 'SOFR', Tenor: c.tenor, MarginBps: String(c.margin ?? a.margin),
@@ -167,7 +167,7 @@
   }
 
   function portfolioMapRows() {
-    return Object.entries(PAM_PORTFOLIOS).flatMap(([wso, pams]) => pams.map(p => ({ WSOPortfolio: wso, PAMPortfolio: p })));
+    return Object.entries(PAM_PORTFOLIOS).flatMap(([av, pams]) => pams.map(p => ({ AllVuePortfolio: av, PAMPortfolio: p })));
   }
 
   function pamPositionRows() {
@@ -196,9 +196,9 @@
       const a = ASSETS.find(x => x.id === f.asset && (!f.port || x.port === f.port));
       const period = f.period || FEE_PERIOD;
       return {
-        WSOPortfolio: a.port, AssetID: a.id, AssetName: a.name, FacilityType: a.fac, FeeType: f.type,
+        AllVuePortfolio: a.port, AssetID: a.id, AssetName: a.name, FacilityType: a.fac, FeeType: f.type,
         PeriodStart: period[0], PeriodEnd: period[1], FeeRateBps: String(f.bps), AverageUnfunded: money(f.avg),
-        DayCount: 'ACT/360', Amount: money(f.amount ?? feeAmount(f.avg, f.bps)), WSOTransactionID: `FT-${++txn}`,
+        DayCount: 'ACT/360', Amount: money(f.amount ?? feeAmount(f.avg, f.bps)), AllVueTransactionID: `FT-${++txn}`,
       };
     });
   }
@@ -210,7 +210,7 @@
     ASSETS.forEach(a => a.prior.forEach(c => {
       if (seen.has(c.id)) return;
       seen.add(c.id);
-      rows.push({ WSOContractID: c.id, PAMContractID: `PC-${++pc}` });
+      rows.push({ AllVueContractID: c.id, PAMContractID: `PC-${++pc}` });
     }));
     return rows;
   }
@@ -222,8 +222,8 @@
     priorAsOfDate: PRIOR_AS_OF,
     build() {
       return {
-        prior: wsoRows('prior'),
-        current: wsoRows('current'),
+        prior: allvueRows('prior'),
+        current: allvueRows('current'),
         trancheMap: trancheMapRows(),
         portfolioMap: portfolioMapRows(),
         pamPositions: pamPositionRows(),

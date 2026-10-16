@@ -8,15 +8,15 @@ function detectSample(mutate) {
   if (mutate) mutate(d);
   return E.detectEvents({
     asOfDate: SampleData.asOfDate,
-    prior: E.normalizeWso(d.prior),
-    current: E.normalizeWso(d.current),
+    prior: E.normalizeAllVue(d.prior),
+    current: E.normalizeAllVue(d.current),
     trancheMap: E.normalizeTrancheMap(d.trancheMap),
     portfolioMap: E.normalizePortfolioMap(d.portfolioMap),
     pamPositions: E.normalizePamPositions(d.pamPositions),
     lineage: E.normalizeLineage(d.lineage),
   });
 }
-const byAsset = (events, id, port = 'LOANS-MASTER') => events.find(e => e.assetId === id && e.wsoPortfolio === port);
+const byAsset = (events, id, port = 'LOANS-MASTER') => events.find(e => e.assetId === id && e.allvuePortfolio === port);
 
 test('allocation always adds back to the amount to the cent', () => {
   const weights = [{ key: 'A', weight: 500 }, { key: 'B', weight: 300 }, { key: 'C', weight: 200 }];
@@ -81,7 +81,7 @@ test('stub period on an otherwise clean roll goes to review', () => {
 test('PAM position break and missing tranche map are exceptions', () => {
   const events = detectSample();
   assert.equal(byAsset(events, 'A1015').route, 'exception');
-  assert.equal(byAsset(events, 'A1024', 'CLO-WSO').route, 'exception');
+  assert.equal(byAsset(events, 'A1024', 'CLO-MASTER').route, 'exception');
 });
 
 test('term loan draw is an exception', () => {

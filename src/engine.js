@@ -1,7 +1,7 @@
 /*
  * Loan Event Bridge engine.
  *
- * Pure functions with no DOM access: CSV parsing, WSO event detection and
+ * Pure functions with no DOM access: CSV parsing, AllVue event detection and
  * classification, PAM portfolio allocation, and PAM import file rows.
  * Loads in the browser as window.Engine and in Node via require().
  *
@@ -36,26 +36,26 @@
   // Input and output file layouts. The PAM layout is a placeholder until the
   // real import message formats are supplied.
   const LAYOUTS = {
-    wso: ['AsOfDate', 'WSOPortfolio', 'AssetID', 'AssetName', 'FacilityType', 'ContractID', 'ContractType',
+    allvue: ['AsOfDate', 'AllVuePortfolio', 'AssetID', 'AssetName', 'FacilityType', 'ContractID', 'ContractType',
       'StartDate', 'EndDate', 'Amount', 'Commitment', 'BaseRate', 'Tenor', 'MarginBps', 'FloorPct',
       'PayFreq', 'ResetFreq', 'DayCount'],
     trancheMap: ['AssetID', 'PAMTrancheID', 'FacilityType'],
-    portfolioMap: ['WSOPortfolio', 'PAMPortfolio'],
+    portfolioMap: ['AllVuePortfolio', 'PAMPortfolio'],
     pamPositions: ['PAMPortfolio', 'PAMTrancheID', 'Funded', 'Unfunded'],
-    lineage: ['WSOContractID', 'PAMContractID'],
+    lineage: ['AllVueContractID', 'PAMContractID'],
     pamImport: ['BatchID', 'Seq', 'EventKey', 'MessageType', 'PAMPortfolio', 'PAMTrancheID', 'PAMContractID',
       'TargetContractRef', 'EffectiveDate', 'Amount', 'BaseRate', 'Tenor', 'MarginBps', 'FloorPct',
       'PayFreq', 'ResetFreq', 'DayCount'],
-    fees: ['WSOPortfolio', 'AssetID', 'AssetName', 'FacilityType', 'FeeType', 'PeriodStart', 'PeriodEnd',
-      'FeeRateBps', 'AverageUnfunded', 'DayCount', 'Amount', 'WSOTransactionID'],
+    fees: ['AllVuePortfolio', 'AssetID', 'AssetName', 'FacilityType', 'FeeType', 'PeriodStart', 'PeriodEnd',
+      'FeeRateBps', 'AverageUnfunded', 'DayCount', 'Amount', 'AllVueTransactionID'],
     pamFeeImport: ['BatchID', 'Seq', 'FeeKey', 'TransactionType', 'FeeType', 'PAMPortfolio', 'PAMTrancheID',
-      'PeriodStart', 'PeriodEnd', 'Amount', 'WSOTransactionID'],
+      'PeriodStart', 'PeriodEnd', 'Amount', 'AllVueTransactionID'],
   };
 
   // A fee may differ from rate x average unfunded x days / basis by the larger of
   // these before it goes to review: $1.00 or 0.1% of the expected amount.
   const FEE_TOLERANCE = { cents: 100, share: 0.001 };
-  // PAM's current unfunded position may differ from WSO's average unfunded for the
+  // PAM's current unfunded position may differ from AllVue's average unfunded for the
   // period by this share before the split by fund is flagged as possibly stale.
   const FEE_POSITION_DRIFT = 0.10;
 
@@ -126,7 +126,7 @@
     return `${sign}${whole}.${String(abs % 100).padStart(2, '0')}`;
   }
 
-  /** Accepts ISO dates and US M/D/YYYY dates (common in WSO exports). */
+  /** Accepts ISO dates and US M/D/YYYY dates (common in AllVue exports). */
   function normalizeDate(value) {
     const s = String(value ?? '').trim();
     let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
@@ -142,12 +142,12 @@
 
   // ---------------------------------------------------------------- normalizing inputs
 
-  function normalizeWso(rows) {
+  function normalizeAllVue(rows) {
     return rows.map(r => {
       const contractType = String(r.ContractType || '').trim().toLowerCase();
       return {
         asOfDate: normalizeDate(r.AsOfDate),
-        wsoPortfolio: String(r.WSOPortfolio || '').trim(),
+        allvuePortfolio: String(r.AllVuePortfolio || '').trim(),
         assetId: String(r.AssetID || '').trim(),
         assetName: String(r.AssetName || r.AssetID || '').trim(),
         facilityType: String(r.FacilityType || '').trim().toUpperCase(),
@@ -179,9 +179,9 @@
   function normalizePortfolioMap(rows) {
     const map = {};
     rows.forEach(r => {
-      const wso = (r.WSOPortfolio || '').trim();
-      if (!wso) return;
-      (map[wso] = map[wso] || []).push(r.PAMPortfolio.trim());
+      const av = (r.AllVuePortfolio || '').trim();
+      if (!av) return;
+      (map[av] = map[av] || []).push(r.PAMPortfolio.trim());
     });
     return map;
   }
@@ -197,7 +197,7 @@
 
   function normalizeLineage(rows) {
     const map = {};
-    rows.forEach(r => { if (r.WSOContractID) map[r.WSOContractID.trim()] = r.PAMContractID.trim(); });
+    rows.forEach(r => { if (r.AllVueContractID) map[r.AllVueContractID.trim()] = r.PAMContractID.trim(); });
     return map;
   }
 
@@ -242,7 +242,7 @@
   const ROUTE_ORDER = { exception: 0, review: 1, auto: 2 };
 
   /**
-   * Compares the prior and current WSO contract snapshots for each WSO
+   * Compares the prior and current AllVue contract snapshots for each AllVue
    * portfolio and asset, and returns one classified event per change.
    */
   function detectEvents(input) {
@@ -255,7 +255,7 @@
     };
     const groups = new Map();
     const add = (rows, side) => rows.forEach(r => {
-      const k = `${r.wsoPortfolio}|${r.assetId}`;
+      const k = `${r.allvuePortfolio}|${r.assetId}`;
       if (!groups.has(k)) groups.set(k, { prior: [], current: [] });
       groups.get(k)[side].push(r);
     });
@@ -268,13 +268,13 @@
       if (ev) events.push(ev);
     }
     events.sort((a, b) => ROUTE_ORDER[a.route] - ROUTE_ORDER[b.route]
-      || a.assetName.localeCompare(b.assetName) || a.wsoPortfolio.localeCompare(b.wsoPortfolio));
+      || a.assetName.localeCompare(b.assetName) || a.allvuePortfolio.localeCompare(b.allvuePortfolio));
     return events;
   }
 
   function classifyGroup(g, ctx) {
     const head = g.current[0] || g.prior[0];
-    const { wsoPortfolio, assetId, assetName, facilityType } = head;
+    const { allvuePortfolio, assetId, assetName, facilityType } = head;
 
     const priorFunded = g.prior.filter(r => !r.unfunded);
     const currentFunded = g.current.filter(r => !r.unfunded);
@@ -334,12 +334,12 @@
     const money = formatMoney;
 
     const tranche = ctx.trancheMap[assetId];
-    const pamPortfolios = ctx.portfolioMap[wsoPortfolio] || [];
+    const pamPortfolios = ctx.portfolioMap[allvuePortfolio] || [];
     if (!tranche) exception(`Asset ${assetId} is not mapped to a PAM tranche. Set the tranche up in PAM and add it to the tranche map.`);
-    if (!pamPortfolios.length) exception(`WSO portfolio ${wsoPortfolio} has no PAM portfolios in the portfolio map.`);
+    if (!pamPortfolios.length) exception(`AllVue portfolio ${allvuePortfolio} has no PAM portfolios in the portfolio map.`);
 
     if (g.current.length && fundedAfter + unfundedAfter !== commitmentAfter) {
-      exception(`Funded ${money(fundedAfter)} plus unfunded ${money(unfundedAfter)} does not equal the commitment of ${money(commitmentAfter)} in the WSO export.`);
+      exception(`Funded ${money(fundedAfter)} plus unfunded ${money(unfundedAfter)} does not equal the commitment of ${money(commitmentAfter)} in the AllVue export.`);
     }
     if (facilityType === 'TL' && unfundedAfter !== 0) {
       exception(`Term loan shows an unfunded amount of ${money(unfundedAfter)}. Term loans should be fully funded.`);
@@ -375,7 +375,7 @@
       review(`${expired.length} contracts roll into ${added.length} with different amounts. This prototype writes close and open messages; confirm that is how PAM should book it.`);
     }
     if (type === 'REPAYMENT' && !g.current.length) {
-      review('The position is no longer in the WSO export. Confirm this is a repayment and not a sale or transfer.');
+      review('The position is no longer in the AllVue export. Confirm this is a repayment and not a sale or transfer.');
     }
     if (rollsAtPeriodEnd && amended.length) {
       info('Other contracts on this tranche also changed and are included in this event.');
@@ -386,7 +386,7 @@
 
     const pamIdOf = c => ctx.lineage[c.contractId] || '';
     [...expired, ...amended.map(a => a.prev)].forEach(c => {
-      if (!pamIdOf(c)) exception(`WSO contract ${c.contractId} has no linked PAM contract in the lineage table.`);
+      if (!pamIdOf(c)) exception(`AllVue contract ${c.contractId} has no linked PAM contract in the lineage table.`);
     });
 
     // ---- PAM positions: tie-out and allocation basis
@@ -404,10 +404,10 @@
         exception(`No PAM positions found in tranche ${tranche.pamTrancheId} for ${pamPortfolios.join(', ')}. A new position needs its trade booked in PAM first.`);
       } else {
         if (pamFunded !== fundedBefore) {
-          exception(`PAM funded position of ${money(pamFunded)} does not tie to WSO's ${money(fundedBefore)} before this event (difference ${money(pamFunded - fundedBefore)}). Clear the break before booking.`);
+          exception(`PAM funded position of ${money(pamFunded)} does not tie to AllVue's ${money(fundedBefore)} before this event (difference ${money(pamFunded - fundedBefore)}). Clear the break before booking.`);
         }
         if (pamUnfunded !== unfundedBefore) {
-          exception(`PAM unfunded position of ${money(pamUnfunded)} does not tie to WSO's ${money(unfundedBefore)} before this event.`);
+          exception(`PAM unfunded position of ${money(pamUnfunded)} does not tie to AllVue's ${money(unfundedBefore)} before this event.`);
         }
       }
     }
@@ -422,7 +422,7 @@
     const lines = buildLines({ type, expired, added, amended, fundedDelta, pamIdOf, effectiveDate });
 
     const key = [
-      wsoPortfolio, assetId, effectiveDate,
+      allvuePortfolio, assetId, effectiveDate,
       `${expired.map(c => c.contractId).sort().join('+') || '-'}>${added.map(c => c.contractId).sort().join('+') || '-'}`,
       amended.length ? '~' + amended.map(a => a.cur.contractId).sort().join('+') : '',
     ].join('|').replace(/\|$/, '');
@@ -453,16 +453,16 @@
       });
     });
 
-    // ---- lineage: which PAM contract each new WSO contract represents
+    // ---- lineage: which PAM contract each new AllVue contract represents
     const lineageUpdates = [];
     if ((type === 'ROLLOVER' || type === 'CONTRACT_CHANGE') && expired.length === 1 && added.length === 1) {
-      lineageUpdates.push({ wsoContractId: added[0].contractId, pamContractId: pamIdOf(expired[0]) });
+      lineageUpdates.push({ allvueContractId: added[0].contractId, pamContractId: pamIdOf(expired[0]) });
     } else {
-      added.forEach(c => lineageUpdates.push({ wsoContractId: c.contractId, pamContractId: newRef(c) }));
+      added.forEach(c => lineageUpdates.push({ allvueContractId: c.contractId, pamContractId: newRef(c) }));
     }
 
     return {
-      key, wsoPortfolio, assetId, assetName, facilityType, effectiveDate,
+      key, allvuePortfolio, assetId, assetName, facilityType, effectiveDate,
       type, typeLabel: TYPE_LABELS[type], legs, route, flags,
       expired, added, amended, unchanged, rollTermChanges,
       totals: { fundedBefore, fundedAfter, fundedDelta, unfundedBefore, unfundedAfter, commitmentBefore, commitmentAfter },
@@ -471,8 +471,8 @@
     };
   }
 
-  // New PAM contracts are referenced by their WSO contract ID until PAM assigns its own.
-  const newRef = c => `WSO-${c.contractId}`;
+  // New PAM contracts are referenced by their AllVue contract ID until PAM assigns its own.
+  const newRef = c => `AV-${c.contractId}`;
 
   function buildLines({ type, expired, added, amended, fundedDelta, pamIdOf, effectiveDate }) {
     const lines = [];
@@ -539,7 +539,7 @@
   function normalizeFees(rows) {
     return rows.map((r, i) => ({
       rowNo: i + 2, // header is line 1
-      wsoPortfolio: String(r.WSOPortfolio || '').trim(),
+      allvuePortfolio: String(r.AllVuePortfolio || '').trim(),
       assetId: String(r.AssetID || '').trim(),
       assetName: String(r.AssetName || r.AssetID || '').trim(),
       facilityType: String(r.FacilityType || '').trim().toUpperCase(),
@@ -550,7 +550,7 @@
       avgUnfunded: toCents(r.AverageUnfunded),
       dayCount: String(r.DayCount || '').trim().toUpperCase(),
       amount: toCents(r.Amount),
-      transactionId: String(r.WSOTransactionID || '').trim(),
+      transactionId: String(r.AllVueTransactionID || '').trim(),
     }));
   }
 
@@ -563,7 +563,7 @@
   }
 
   /**
-   * Checks each row of a WSO unfunded fee export and splits it across the PAM
+   * Checks each row of an AllVue unfunded fee export and splits it across the PAM
    * portfolios on their current unfunded position in the tranche.
    */
   function checkFees(input) {
@@ -578,7 +578,7 @@
       const exception = text => flags.push({ level: 'exception', text });
       const review = text => flags.push({ level: 'review', text });
 
-      let key = ['FEE', f.wsoPortfolio, f.assetId, f.feeType.toUpperCase(), f.periodStart, f.periodEnd].join('|');
+      let key = ['FEE', f.allvuePortfolio, f.assetId, f.feeType.toUpperCase(), f.periodStart, f.periodEnd].join('|');
       if (firstRowByKey.has(key)) {
         exception(`Same facility, fee type and period as row ${firstRowByKey.get(key)} of the export. Load only one of them.`);
         key += `|row${f.rowNo}`;
@@ -587,10 +587,10 @@
       const { days, expected } = expectedFee(f);
       const diff = f.amount - expected;
       const tranche = trancheMap[f.assetId];
-      const pamPortfolios = portfolioMap[f.wsoPortfolio] || [];
+      const pamPortfolios = portfolioMap[f.allvuePortfolio] || [];
 
       if (!tranche) exception(`Asset ${f.assetId} is not mapped to a PAM tranche. Set the tranche up in PAM and add it to the tranche map.`);
-      if (!pamPortfolios.length) exception(`WSO portfolio ${f.wsoPortfolio} has no PAM portfolios in the portfolio map.`);
+      if (!pamPortfolios.length) exception(`AllVue portfolio ${f.allvuePortfolio} has no PAM portfolios in the portfolio map.`);
       if (f.facilityType === 'TL') exception('Unfunded fee on a term loan. Term loans have no unfunded commitment, so check the asset or the fee type.');
       if (days <= 0) exception(`Period end ${f.periodEnd} is before period start ${f.periodStart}.`);
 
@@ -614,7 +614,7 @@
           exception(`No unfunded position in PAM for tranche ${tranche.pamTrancheId} in ${pamPortfolios.join(', ')}, so there is nothing to split the fee on.`);
         } else if (f.avgUnfunded > 0 && Math.abs(pamUnfunded - f.avgUnfunded) / f.avgUnfunded > FEE_POSITION_DRIFT) {
           const pct = Math.round(Math.abs(pamUnfunded - f.avgUnfunded) / f.avgUnfunded * 100);
-          review(`PAM unfunded today (${money(pamUnfunded)}) differs from WSO's average unfunded for the period (${money(f.avgUnfunded)}) by ${pct}%. Unfunded changed during the period, so check the split by fund.`);
+          review(`PAM unfunded today (${money(pamUnfunded)}) differs from AllVue's average unfunded for the period (${money(f.avgUnfunded)}) by ${pct}%. Unfunded changed during the period, so check the split by fund.`);
         }
       }
 
@@ -630,7 +630,7 @@
         PeriodStart: f.periodStart,
         PeriodEnd: f.periodEnd,
         Amount: fromCents(allocation[w.key]),
-        WSOTransactionID: f.transactionId,
+        AllVueTransactionID: f.transactionId,
       })) : [];
 
       const route = flags.some(x => x.level === 'exception') ? 'exception' : flags.length ? 'review' : 'clean';
@@ -655,7 +655,7 @@
     TERM_FIELDS, TERM_LABELS, TENOR_DAYS, TYPE_LABELS, LAYOUTS,
     parseCSV, toCSV, missingColumns,
     toCents, fromCents, formatMoney, normalizeDate, daysBetween,
-    normalizeWso, normalizeTrancheMap, normalizePortfolioMap, normalizePamPositions, normalizeLineage,
+    normalizeAllVue, normalizeTrancheMap, normalizePortfolioMap, normalizePamPositions, normalizeLineage,
     allocate, detectEvents, buildBatchRows,
     FEE_TOLERANCE, FEE_POSITION_DRIFT, normalizeFees, expectedFee, checkFees,
   };

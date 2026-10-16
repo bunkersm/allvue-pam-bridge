@@ -6,7 +6,7 @@
   'use strict';
   const E = window.Engine;
   const S = window.SampleData;
-  const STORE_KEY = 'loan-event-bridge:v1';
+  const STORE_KEY = 'loan-event-bridge:v2';
 
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const money = E.formatMoney;
@@ -50,13 +50,13 @@
   ];
 
   const INPUTS = [
-    { key: 'prior', title: 'WSO contracts, prior day', layout: 'wso', desc: 'Contract-level export from the previous business day. Detection compares it with the current day.' },
-    { key: 'current', title: 'WSO contracts, current day', layout: 'wso', desc: 'Same export for the day you are processing. Its AsOfDate becomes the run date.' },
-    { key: 'portfolioMap', title: 'Portfolio map', layout: 'portfolioMap', desc: 'One row per PAM portfolio fed by a WSO portfolio.' },
-    { key: 'trancheMap', title: 'Tranche map', layout: 'trancheMap', desc: 'Links each WSO asset to its PAM facility tranche.' },
+    { key: 'prior', title: 'AllVue contracts, prior day', layout: 'allvue', desc: 'Contract-level export from the previous business day. Detection compares it with the current day.' },
+    { key: 'current', title: 'AllVue contracts, current day', layout: 'allvue', desc: 'Same export for the day you are processing. Its AsOfDate becomes the run date.' },
+    { key: 'portfolioMap', title: 'Portfolio map', layout: 'portfolioMap', desc: 'One row per PAM portfolio fed by an AllVue portfolio.' },
+    { key: 'trancheMap', title: 'Tranche map', layout: 'trancheMap', desc: 'Links each AllVue asset to its PAM facility tranche.' },
     { key: 'pamPositions', title: 'PAM positions', layout: 'pamPositions', desc: 'Funded and unfunded position per PAM portfolio and tranche. Used for tie-out and allocation.' },
-    { key: 'lineage', title: 'Contract lineage', layout: 'lineage', desc: 'Which PAM contract each live WSO contract represents.' },
-    { key: 'fees', title: 'WSO unfunded fee export', layout: 'fees', desc: 'Monthly commitment and ticking fees. PeriodEnd is the last accrual day.' },
+    { key: 'lineage', title: 'Contract lineage', layout: 'lineage', desc: 'Which PAM contract each live AllVue contract represents.' },
+    { key: 'fees', title: 'AllVue unfunded fee export', layout: 'fees', desc: 'Monthly commitment and ticking fees. PeriodEnd is the last accrual day.' },
   ];
 
   // ------------------------------------------------------------------ state
@@ -116,8 +116,8 @@
   const itemByKey = key => eventByKey(key) || feeByKey(key);
   const periodText = f => `${f.periodStart} to ${f.periodEnd}`;
   const eventLabel = ev => ev.kind === 'fee'
-    ? `${ev.feeType}, ${ev.assetName} (${ev.wsoPortfolio}), ${periodText(ev)}`
-    : `${ev.typeLabel}, ${ev.assetName} (${ev.wsoPortfolio})`;
+    ? `${ev.feeType}, ${ev.assetName} (${ev.allvuePortfolio}), ${periodText(ev)}`
+    : `${ev.typeLabel}, ${ev.assetName} (${ev.allvuePortfolio})`;
 
   function log(action, ref, label, note) {
     state.audit.unshift({ at: now(), user: state.user || 'Unknown user', action, ref: ref || '', label: label || '', note: note || '' });
@@ -127,8 +127,8 @@
     state.status[key] = { ...state.status[key], status, note: note || '', at: now(), by: state.user, ...extra };
   }
 
-  function applyLineage(ev) { (ev.lineageUpdates || []).forEach(u => { state.lineage[u.wsoContractId] = u.pamContractId; }); }
-  function removeLineage(ev) { (ev.lineageUpdates || []).forEach(u => { delete state.lineage[u.wsoContractId]; }); }
+  function applyLineage(ev) { (ev.lineageUpdates || []).forEach(u => { state.lineage[u.allvueContractId] = u.pamContractId; }); }
+  function removeLineage(ev) { (ev.lineageUpdates || []).forEach(u => { delete state.lineage[u.allvueContractId]; }); }
 
   // ------------------------------------------------------------------ detection
 
@@ -138,8 +138,8 @@
       const i = state.inputs;
       events = E.detectEvents({
         asOfDate: state.asOfDate,
-        prior: E.normalizeWso(i.prior),
-        current: E.normalizeWso(i.current),
+        prior: E.normalizeAllVue(i.prior),
+        current: E.normalizeAllVue(i.current),
         trancheMap: E.normalizeTrancheMap(i.trancheMap),
         portfolioMap: E.normalizePortfolioMap(i.portfolioMap),
         pamPositions: E.normalizePamPositions(i.pamPositions),
@@ -386,7 +386,7 @@
       <section class="section">
         <div class="panel run">
           <dl>
-            <div><dt>WSO snapshots</dt><dd class="mono">${esc(state.priorAsOfDate)} → ${esc(state.asOfDate)}</dd></div>
+            <div><dt>AllVue snapshots</dt><dd class="mono">${esc(state.priorAsOfDate)} → ${esc(state.asOfDate)}</dd></div>
             <div><dt>Source</dt><dd>${esc(state.sourceLabel)}</dd></div>
             <div><dt>Last detection</dt><dd>${run ? `${fmtTime(run.at)}, ${run.total} events` : 'Not run yet'}</dd></div>
           </dl>
@@ -411,7 +411,7 @@
     const rows = state.events.filter(ev => {
       if (state.filter !== 'all' && STATUS[statusOf(ev)].group !== state.filter) return false;
       if (!q) return true;
-      const hay = [ev.assetName, ev.assetId, ev.wsoPortfolio, ev.typeLabel, ...ev.expired.map(c => c.contractId), ...ev.added.map(c => c.contractId), ...ev.amended.map(a => a.cur.contractId)].join(' ').toLowerCase();
+      const hay = [ev.assetName, ev.assetId, ev.allvuePortfolio, ev.typeLabel, ...ev.expired.map(c => c.contractId), ...ev.added.map(c => c.contractId), ...ev.amended.map(a => a.cur.contractId)].join(' ').toLowerCase();
       return hay.includes(q);
     });
     if (!rows.length) {
@@ -419,7 +419,7 @@
       return `<div class="table-wrap"><div class="empty">${msg}</div></div>`;
     }
     return `<div class="table-wrap"><table>
-      <thead><tr><th>Status</th><th>Event</th><th>Asset</th><th>WSO portfolio</th><th>Effective</th><th>WSO contracts</th><th class="num">Funded change</th><th class="num">PAM msgs</th><th>Checks</th></tr></thead>
+      <thead><tr><th>Status</th><th>Event</th><th>Asset</th><th>AllVue portfolio</th><th>Effective</th><th>AllVue contracts</th><th class="num">Funded change</th><th class="num">PAM msgs</th><th>Checks</th></tr></thead>
       <tbody>${rows.map(ev => {
         const st = statusOf(ev);
         const info = statusInfo(ev);
@@ -428,7 +428,7 @@
           <td><span class="type">${esc(ev.typeLabel)}</span> ${ev.legs.map(l => `<span class="tag">+ ${esc(E.TYPE_LABELS[l].toLowerCase())}</span>`).join(' ')}
             ${st === 'failed' && info.error ? `<div class="small" style="color:var(--bad)">${esc(info.error)}</div>` : ''}</td>
           <td>${esc(ev.assetName)}<div class="muted small"><span class="mono">${esc(ev.assetId)}</span> · ${esc(ev.facilityType)}</div></td>
-          <td class="mono">${esc(ev.wsoPortfolio)}</td>
+          <td class="mono">${esc(ev.allvuePortfolio)}</td>
           <td class="mono">${esc(ev.effectiveDate)}</td>
           <td class="mono">${esc(contractsSummary(ev))}</td>
           <td class="num">${deltaCell(ev.totals.fundedDelta)}</td>
@@ -486,12 +486,12 @@
       return `<td class="${cls}${changed ? ' changed' : ''}">${esc(val)}</td>`;
     };
     return `<div class="table-wrap"><table>
-      <thead><tr><th></th><th>WSO contract</th><th>PAM contract</th><th>Period</th><th class="num">Days</th><th class="num">Amount</th><th>Tenor</th><th class="num">Margin</th><th class="num">Floor</th><th>Pay</th><th>Reset</th><th>Day count</th></tr></thead>
+      <thead><tr><th></th><th>AllVue contract</th><th>PAM contract</th><th>Period</th><th class="num">Days</th><th class="num">Amount</th><th>Tenor</th><th class="num">Margin</th><th class="num">Floor</th><th>Pay</th><th>Reset</th><th>Day count</th></tr></thead>
       <tbody>${rows.map(r => {
         const days = E.daysBetween(r.c.startDate, r.c.endDate);
         const range = E.TENOR_DAYS[r.c.tenor];
         const irregular = r.side === 'New' && range && (days < range[0] || days > range[1]);
-        const pending = ev.lineageUpdates.find(u => u.wsoContractId === r.c.contractId);
+        const pending = ev.lineageUpdates.find(u => u.allvueContractId === r.c.contractId);
         const pam = pamFor(r.c.contractId) || (pending ? pending.pamContractId : '');
         return `<tr>
           <td class="small muted">${r.side}</td>
@@ -518,13 +518,13 @@
       return `<tr><td><span class="mono">${esc(l.messageType)}</span><div class="small muted">${esc(l.note)}</div></td>
         ${parts.map(p => `<td class="num">${money(p)}</td>`).join('')}
         <td class="num">${money(l.amount)}</td>
-        <td class="small" style="color:${ties ? 'var(--ok)' : 'var(--bad)'}">${l.allocation ? (ties ? 'Ties to WSO' : `Off by ${money(sum - l.amount)}`) : 'Not allocated'}</td></tr>`;
+        <td class="small" style="color:${ties ? 'var(--ok)' : 'var(--bad)'}">${l.allocation ? (ties ? 'Ties to AllVue' : `Off by ${money(sum - l.amount)}`) : 'Not allocated'}</td></tr>`;
     }).join('');
     return `<div class="table-wrap"><table>
-      <thead><tr><th>Line</th>${head}<th class="num">WSO amount</th><th>Check</th></tr></thead>
+      <thead><tr><th>Line</th>${head}<th class="num">AllVue amount</th><th>Check</th></tr></thead>
       <tbody>${posRow}${lineRows || `<tr><td colspan="${basis.length + 3}" class="muted">Nothing to allocate: this event sends no PAM messages.</td></tr>`}</tbody>
     </table></div>
-    <p class="small muted">Split pro rata on each PAM portfolio's ${ev.kind === 'fee' ? 'current unfunded position' : 'position'} in tranche <span class="mono">${esc(ev.pamTrancheId)}</span>, using largest-remainder rounding so every line adds back to the WSO amount to the cent.</p>`;
+    <p class="small muted">Split pro rata on each PAM portfolio's ${ev.kind === 'fee' ? 'current unfunded position' : 'position'} in tranche <span class="mono">${esc(ev.pamTrancheId)}</span>, using largest-remainder rounding so every line adds back to the AllVue amount to the cent.</p>`;
   }
 
   function messageTable(ev) {
@@ -573,7 +573,7 @@
         return `<p class="small">In PAM file <span class="mono">${esc(info.batchId)}</span>, waiting for the import result.</p>
           <div class="row"><button class="btn" data-action="openBatch" data-batch="${esc(info.batchId)}">Open PAM file</button></div>`;
       case 'verified':
-        return `<p class="small">Verified automatically by detection. Amount, terms and period length match, so PAM needs no message. The new WSO contract now links to the same PAM contract.</p>`;
+        return `<p class="small">Verified automatically by detection. Amount, terms and period length match, so PAM needs no message. The new AllVue contract now links to the same PAM contract.</p>`;
       default:
         return `<p class="small">${chip(st)} ${by ? `by ${by}` : ''}</p>${note}`;
     }
@@ -593,7 +593,7 @@
       <aside class="drawer" role="dialog" aria-modal="true" aria-label="${esc(eventLabel(ev))}">
         <header class="drawer-head">
           <div class="title-row">
-            <div><div class="eyebrow">${esc(ev.typeLabel)} · ${esc(ev.facilityType)} · ${esc(ev.wsoPortfolio)}</div><h2>${esc(ev.assetName)}</h2></div>
+            <div><div class="eyebrow">${esc(ev.typeLabel)} · ${esc(ev.facilityType)} · ${esc(ev.allvuePortfolio)}</div><h2>${esc(ev.assetName)}</h2></div>
             <button class="btn" data-action="close" id="drawer-close">Close</button>
           </div>
           <div class="row">${chip(statusOf(ev))} ${ev.legs.map(l => `<span class="tag">+ ${esc(E.TYPE_LABELS[l].toLowerCase())}</span>`).join(' ')} <span class="small muted">Effective <span class="mono">${esc(ev.effectiveDate)}</span></span></div>
@@ -601,8 +601,8 @@
         <div class="drawer-body">
           <section><p>${describe(ev)}</p></section>
           ${ev.flags.length ? `<section><h3>Checks</h3><ul class="flags">${ev.flags.map(f => `<li class="flag ${f.level}"><b>${flagLabel[f.level]}.</b>${esc(f.text)}</li>`).join('')}</ul></section>` : ''}
-          <section><h3>WSO contracts</h3>${contractTable(ev)}<p class="small muted">Highlighted cells differ from the expiring contract, or show an irregular period length.</p></section>
-          <section><h3>Tranche totals in ${esc(ev.wsoPortfolio)}</h3>
+          <section><h3>AllVue contracts</h3>${contractTable(ev)}<p class="small muted">Highlighted cells differ from the expiring contract, or show an irregular period length.</p></section>
+          <section><h3>Tranche totals in ${esc(ev.allvuePortfolio)}</h3>
             <dl class="kv">
               <div><dt>Funded</dt><dd class="figure">${money(t.fundedBefore)} → ${money(t.fundedAfter)}</dd><dd class="small">${deltaCell(t.fundedDelta)}</dd></div>
               <div><dt>Unfunded</dt><dd class="figure">${money(t.unfundedBefore)} → ${money(t.unfundedAfter)}</dd></div>
@@ -611,7 +611,7 @@
             </dl></section>
           <section><h3>Allocation to PAM portfolios</h3>${allocationTable(ev)}</section>
           <section><div class="section-head"><h3>PAM messages</h3>${ev.messages.length ? '<button class="btn ghost" data-action="copyMessages">Copy as CSV</button>' : ''}</div>${messageTable(ev)}</section>
-          <section><h3>Event key</h3><p class="mono small" style="word-break:break-all">${esc(ev.key)}</p><p class="small muted">The same WSO change always produces the same key, so re-running detection never creates a duplicate.</p></section>
+          <section><h3>Event key</h3><p class="mono small" style="word-break:break-all">${esc(ev.key)}</p><p class="small muted">The same AllVue change always produces the same key, so re-running detection never creates a duplicate.</p></section>
           ${history.length ? `<section><h3>History</h3><ul class="flags">${history.map(h => `<li class="flag info"><b>${esc(h.action)}</b> by ${esc(h.user)}, ${fmtTime(h.at)}${h.note ? `. “${esc(h.note)}”` : ''}</li>`).join('')}</ul></section>` : ''}
         </div>
         <footer class="actions">${actionsFor(ev)}</footer>
@@ -632,7 +632,7 @@
     const group = FEE_GROUPS.find(g => g.id === state.feeFilter) || FEE_GROUPS[0];
     const rows = state.fees.filter(f => state.feeFilter === 'all' || STATUS[statusOf(f)].group === state.feeFilter);
     const table = rows.length ? `<div class="table-wrap"><table>
-      <thead><tr><th>Status</th><th>Facility</th><th>Fee</th><th>WSO portfolio</th><th>Period</th><th class="num">Rate (bps)</th><th class="num">Avg unfunded</th><th class="num">Amount</th><th class="num">Expected</th><th class="num">Difference</th><th>Checks</th></tr></thead>
+      <thead><tr><th>Status</th><th>Facility</th><th>Fee</th><th>AllVue portfolio</th><th>Period</th><th class="num">Rate (bps)</th><th class="num">Avg unfunded</th><th class="num">Amount</th><th class="num">Expected</th><th class="num">Difference</th><th>Checks</th></tr></thead>
       <tbody>${rows.map(f => {
         const st = statusOf(f);
         const info = statusInfo(f);
@@ -640,7 +640,7 @@
           <td>${chip(st)}${st === 'failed' && info.error ? `<div class="small" style="color:var(--bad)">${esc(info.error)}</div>` : ''}</td>
           <td>${esc(f.assetName)}<div class="muted small"><span class="mono">${esc(f.assetId)}</span> · ${esc(f.facilityType)}</div></td>
           <td>${esc(f.feeType)}</td>
-          <td class="mono">${esc(f.wsoPortfolio)}</td>
+          <td class="mono">${esc(f.allvuePortfolio)}</td>
           <td class="mono nowrap">${esc(f.periodStart)} → ${esc(f.periodEnd)}</td>
           <td class="num">${esc(f.rateBps)}</td>
           <td class="num">${money(f.avgUnfunded)}</td>
@@ -679,10 +679,10 @@
   function feeMessageTable(f) {
     if (!f.messages.length) return '<p class="muted">No PAM messages for this fee.</p>';
     return `<div class="table-wrap"><table>
-      <thead><tr><th>Transaction</th><th>Fee type</th><th>PAM portfolio</th><th>PAM tranche</th><th>Period</th><th class="num">Amount</th><th>WSO transaction</th></tr></thead>
+      <thead><tr><th>Transaction</th><th>Fee type</th><th>PAM portfolio</th><th>PAM tranche</th><th>Period</th><th class="num">Amount</th><th>AllVue transaction</th></tr></thead>
       <tbody>${f.messages.map(m => `<tr>
         <td class="mono">${esc(m.TransactionType)}</td><td>${esc(m.FeeType)}</td><td class="mono">${esc(m.PAMPortfolio)}</td><td class="mono">${esc(m.PAMTrancheID)}</td>
-        <td class="mono nowrap">${esc(m.PeriodStart)} → ${esc(m.PeriodEnd)}</td><td class="num">${money(E.toCents(m.Amount))}</td><td class="mono">${esc(m.WSOTransactionID)}</td></tr>`).join('')}</tbody>
+        <td class="mono nowrap">${esc(m.PeriodStart)} → ${esc(m.PeriodEnd)}</td><td class="num">${money(E.toCents(m.Amount))}</td><td class="mono">${esc(m.AllVueTransactionID)}</td></tr>`).join('')}</tbody>
     </table></div>`;
   }
 
@@ -698,7 +698,7 @@
       <aside class="drawer" role="dialog" aria-modal="true" aria-label="${esc(eventLabel(f))}">
         <header class="drawer-head">
           <div class="title-row">
-            <div><div class="eyebrow">${esc(f.feeType)} · ${esc(f.facilityType)} · ${esc(f.wsoPortfolio)}</div><h2>${esc(f.assetName)}</h2></div>
+            <div><div class="eyebrow">${esc(f.feeType)} · ${esc(f.facilityType)} · ${esc(f.allvuePortfolio)}</div><h2>${esc(f.assetName)}</h2></div>
             <button class="btn" data-action="close" id="drawer-close">Close</button>
           </div>
           <div class="row">${chip(statusOf(f))} <span class="small muted">Export row ${f.rowNo} · <span class="mono">${esc(f.transactionId)}</span></span></div>
@@ -712,7 +712,7 @@
               <div><dt>Average unfunded</dt><dd class="figure">${money(f.avgUnfunded)}</dd></div>
               <div><dt>Days / basis</dt><dd class="figure">${f.days} / ${basis}</dd></div>
               <div><dt>Expected</dt><dd class="figure">${money(f.expected)}</dd></div>
-              <div><dt>WSO amount</dt><dd class="figure">${money(f.amount)}</dd></div>
+              <div><dt>AllVue amount</dt><dd class="figure">${money(f.amount)}</dd></div>
               <div><dt>Difference</dt><dd class="figure">${f.amount < 0 ? 'Not checked (correction)' : deltaCell(f.diff)}</dd></div>
               <div><dt>PAM unfunded today</dt><dd class="figure">${money(f.pamUnfunded)}</dd></div>
               <div><dt>PAM tranche</dt><dd class="mono">${esc(f.pamTrancheId) || 'Not mapped'}</dd></div>
@@ -830,15 +830,15 @@
         <h2>Rules in use</h2>
         <div class="panel panel-pad">
           <ul class="rules">
-            <li>For each WSO portfolio and asset, contracts in the prior snapshot that are gone today are <b>expiring</b>; contracts that are new today are <b>new</b>.</li>
+            <li>For each AllVue portfolio and asset, contracts in the prior snapshot that are gone today are <b>expiring</b>; contracts that are new today are <b>new</b>.</li>
             <li>1 expiring → 1 new with the same terms is a <b>rollover</b>. With different margin, tenor, floor, pay or reset frequency, or day count it is a <b>contract change</b>.</li>
             <li>1 → many is a <b>split</b>, many → 1 is a <b>combine</b>, many → many is a <b>complex restructure</b>. New contracts with nothing expiring are a <b>draw</b>.</li>
             <li>A lower funded total is a <b>paydown</b>; a higher one is a <b>draw</b>. These are booked before any restructure message.</li>
             <li>A rollover is <b>clean</b> and needs no PAM message when amount and terms match and the new period is regular (${esc(tenors)}).</li>
-            <li><b>Exceptions</b>: asset or portfolio not mapped, PAM positions not tying to WSO before the event, funded plus unfunded not equal to commitment, term loan draws, draws larger than unfunded, missing PAM contract lineage.</li>
+            <li><b>Exceptions</b>: asset or portfolio not mapped, PAM positions not tying to AllVue before the event, funded plus unfunded not equal to commitment, term loan draws, draws larger than unfunded, missing PAM contract lineage.</li>
             <li>Amounts are allocated to PAM portfolios pro rata on their current position (funded plus unfunded), with largest-remainder rounding.</li>
             <li><b>Fees</b>: each fee should equal rate × average unfunded × days ÷ 360 (or 365), within the larger of ${money(E.FEE_TOLERANCE.cents)} or ${(E.FEE_TOLERANCE.share * 100).toFixed(1)}%. Otherwise it goes to review.</li>
-            <li>Fees go to review when negative or zero, or when PAM's unfunded position today differs from WSO's average unfunded by more than ${E.FEE_POSITION_DRIFT * 100}%. Fees on term loans, duplicate rows and unmapped facilities are exceptions.</li>
+            <li>Fees go to review when negative or zero, or when PAM's unfunded position today differs from AllVue's average unfunded by more than ${E.FEE_POSITION_DRIFT * 100}%. Fees on term loans, duplicate rows and unmapped facilities are exceptions.</li>
             <li>Fees are split across PAM portfolios on their current <b>unfunded</b> position in the tranche.</li>
           </ul>
         </div>
@@ -846,15 +846,15 @@
       <section class="section">
         <h2>Mappings</h2>
         <div class="panel panel-pad stack">
-          <details><summary>Portfolio map (${Object.keys(pm).length} WSO portfolios)</summary>
-            <div class="table-wrap"><table><thead><tr><th>WSO portfolio</th><th>PAM portfolios</th></tr></thead>
+          <details><summary>Portfolio map (${Object.keys(pm).length} AllVue portfolios)</summary>
+            <div class="table-wrap"><table><thead><tr><th>AllVue portfolio</th><th>PAM portfolios</th></tr></thead>
             <tbody>${Object.entries(pm).map(([w, p]) => `<tr><td class="mono">${esc(w)}</td><td class="mono">${p.map(esc).join(', ')}</td></tr>`).join('')}</tbody></table></div></details>
           <details><summary>Tranche map (${state.inputs.trancheMap.length} assets)</summary>
             ${simpleTable(state.inputs.trancheMap, E.LAYOUTS.trancheMap)}</details>
           <details><summary>PAM positions (${state.inputs.pamPositions.length} rows)</summary>
             ${simpleTable(state.inputs.pamPositions, E.LAYOUTS.pamPositions, ['Funded', 'Unfunded'])}</details>
           <details><summary>Contract lineage (${Object.keys(state.lineage).length} links, updated as events are approved)</summary>
-            <div class="table-wrap"><table><thead><tr><th>WSO contract</th><th>PAM contract</th></tr></thead>
+            <div class="table-wrap"><table><thead><tr><th>AllVue contract</th><th>PAM contract</th></tr></thead>
             <tbody>${Object.entries(state.lineage).map(([w, p]) => `<tr><td class="mono">${esc(w)}</td><td class="mono">${esc(p)}</td></tr>`).join('')}</tbody></table></div></details>
         </div>
       </section>`;

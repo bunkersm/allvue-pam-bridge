@@ -2,7 +2,7 @@
   "name": "loan-event-bridge",
   "version": "0.1.0",
   "private": true,
-  "description": "Prototype: detect WSO loan contract activity, review it, and generate PAM import files.",
+  "description": "Prototype: detect AllVue loan contract activity, review it, and generate PAM import files.",
   "scripts": {
     "test": "node --test"
   }
