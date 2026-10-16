@@ -31,10 +31,10 @@ test('allocation always adds back to the amount to the cent', () => {
 test('sample month-end produces the expected routes', () => {
   const events = detectSample();
   const count = r => events.filter(e => e.route === r).length;
-  assert.equal(events.length, 25);
-  assert.equal(count('auto'), 14);
-  assert.equal(count('review'), 9);
-  assert.equal(count('exception'), 2);
+  assert.equal(events.length, 26);
+  assert.equal(count('auto'), 13);
+  assert.equal(count('review'), 10);
+  assert.equal(count('exception'), 3);
 });
 
 test('clean rollover is auto and sends nothing', () => {
@@ -45,22 +45,72 @@ test('clean rollover is auto and sends nothing', () => {
   assert.equal(ev.lineageUpdates[0].pamContractId.startsWith('PC-'), true);
 });
 
-test('margin change at roll is a contract change for review', () => {
+test('margin change at roll creates a new contract, then a global and portfolio 1:1 split', () => {
   const ev = byAsset(detectSample(), 'A1005');
   assert.equal(ev.type, 'CONTRACT_CHANGE');
   assert.equal(ev.route, 'review');
   assert.deepEqual(ev.rollTermChanges.map(d => d.field), ['marginBps']);
-  assert.ok(ev.messages.every(m => m.MessageType === 'CONTRACT_CHANGE' && m.MarginBps === 350));
+  assert.deepEqual(ev.messages.map(m => `${m.Step}:${m.Level}:${m.MessageType}`), [
+    '1:SMF:CONTRACT_CREATE', '2:GLOBAL:CONTRACT_SPLIT',
+    '2:PORTFOLIO:CONTRACT_SPLIT', '2:PORTFOLIO:CONTRACT_SPLIT', '2:PORTFOLIO:CONTRACT_SPLIT',
+  ]);
+  const create = ev.messages[0];
+  assert.equal(create.MarginBps, 350);
+  assert.equal(create.ToContractID, ev.added[0].contractId, 'new PAM contract takes the AllVue contract ID');
+  assert.ok(ev.messages.slice(1).every(m => m.FromContractID === ev.lineageUpdates[0].pamContractId || m.ToContractID === create.ToContractID));
+  const portfolio = ev.messages.filter(m => m.Level === 'PORTFOLIO').reduce((s, m) => s + E.toCents(m.Units), 0);
+  assert.equal(portfolio, ev.expired[0].amount);
 });
 
-test('split allocates each new contract across PAM portfolios exactly', () => {
+test('split ties by new contract and by portfolio', () => {
   const ev = byAsset(detectSample(), 'A1007');
   assert.equal(ev.type, 'SPLIT');
   assert.equal(ev.lines.length, 2);
   for (const line of ev.lines) {
     assert.equal(Object.values(line.allocation).reduce((s, v) => s + v, 0), line.amount);
   }
-  assert.equal(ev.messages.length, 6);
+  // Each portfolio's pieces add back to its share of the old contract.
+  const holding = E.allocate(ev.expired[0].amount, ev.allocationBasis.map(b => ({ key: b.pamPortfolio, weight: b.weight })));
+  for (const p of Object.keys(holding)) {
+    assert.equal(ev.lines.reduce((s, l) => s + l.allocation[p], 0), holding[p]);
+  }
+  assert.equal(ev.messages.filter(m => m.Level === 'SMF').length, 2);
+  assert.equal(ev.messages.filter(m => m.Level === 'GLOBAL').length, 2);
+  assert.equal(ev.messages.filter(m => m.Level === 'PORTFOLIO').length, 6);
+});
+
+test('many to many is a combine into the first new contract, then a split', () => {
+  const ev = byAsset(detectSample(), 'A1022', 'CLO-MASTER');
+  const order = [...new Set(ev.messages.map(m => `${m.Step}:${m.MessageType}`))];
+  assert.deepEqual(order, ['1:CONTRACT_CREATE', '2:CONTRACT_COMBINE', '3:CONTRACT_SPLIT']);
+  const split = ev.messages.find(m => m.MessageType === 'CONTRACT_SPLIT');
+  assert.equal(split.FromContractID, ev.added[0].contractId);
+});
+
+test('global action carries global units, portfolio rows carry your units', () => {
+  const ev = byAsset(detectSample(), 'A1009');
+  const global = ev.messages.filter(m => m.Level === 'GLOBAL');
+  assert.equal(global.length, 1);
+  assert.equal(E.toCents(global[0].Units), -ev.totals.globalDelta);
+});
+
+test('position change with no global change is a trade, not a paydown', () => {
+  const ev = byAsset(detectSample(), 'A1023', 'CLO-MASTER');
+  assert.equal(ev.route, 'exception');
+  assert.ok(ev.flags.some(f => /looks like a sale/.test(f.text)));
+});
+
+test('increase on a capitalizing contract is PIK interest, not a term loan draw', () => {
+  const ev = byAsset(detectSample(), 'A1034');
+  assert.equal(ev.route, 'review');
+  assert.deepEqual(ev.legs, ['CAPITALIZE']);
+  assert.ok(ev.messages.every(m => m.MessageType === 'CAPITALIZE'));
+  assert.ok(!ev.flags.some(f => /do not draw/.test(f.text)));
+});
+
+test('missing global amounts are an exception', () => {
+  const events = detectSample(d => { d.current.find(r => r.AssetID === 'A1001').GlobalAmount = ''; });
+  assert.equal(byAsset(events, 'A1001').route, 'exception');
 });
 
 test('revolver rollover with a paydown sends only the paydown', () => {
@@ -68,7 +118,7 @@ test('revolver rollover with a paydown sends only the paydown', () => {
   assert.equal(ev.type, 'ROLLOVER');
   assert.deepEqual(ev.legs, ['PAYDOWN']);
   assert.ok(ev.messages.every(m => m.MessageType === 'PAYDOWN'));
-  const total = ev.messages.reduce((s, m) => s + E.toCents(m.Amount), 0);
+  const total = ev.messages.filter(m => m.Level === 'PORTFOLIO').reduce((s, m) => s + E.toCents(m.Units), 0);
   assert.equal(total, E.toCents(2000000));
 });
 
@@ -88,6 +138,7 @@ test('term loan draw is an exception', () => {
   const events = detectSample(d => {
     const row = d.current.find(r => r.AssetID === 'A1001');
     row.Amount = '15962500.00';
+    row.GlobalAmount = '399062500.00';
     row.Commitment = '15962500.00';
   });
   const ev = byAsset(events, 'A1001');

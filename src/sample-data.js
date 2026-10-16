@@ -32,7 +32,7 @@
   const id = () => String(++nextId);
 
   /** A funded contract. period is [start, end]; opts can pin an id or override margin. */
-  const k = (tenor, amount, period, opts = {}) => ({ id: opts.id || id(), tenor, amount, period, margin: opts.margin });
+  const k = (tenor, amount, period, opts = {}) => ({ id: opts.id || id(), tenor, amount, period, margin: opts.margin, global: opts.global });
   const prior = (tenor, amount, opts) => k(tenor, amount, PERIODS[tenor].prior, opts);
   const next = (tenor, amount, opts) => k(tenor, amount, PERIODS[tenor].next, opts);
   const roll = (tenor, amount) => ({ prior: [prior(tenor, amount)], current: [next(tenor, amount)] });
@@ -41,7 +41,7 @@
     // ---- LOANS-MASTER
     { id: 'A1001', name: 'Alder Ridge Foods TLB', port: 'LOANS-MASTER', fac: 'TL', margin: 325, floor: 0.5, ...roll('1M', 14962500) },
     { id: 'A1002', name: 'Bluestem Logistics TLB', port: 'LOANS-MASTER', fac: 'TL', margin: 400, floor: 0.75, ...roll('3M', 22343750) },
-    { id: 'A1003', name: 'Copperline Software TL', port: 'LOANS-MASTER', fac: 'TL', margin: 350, floor: 0.5,
+    { id: 'A1003', name: 'Copperline Software TL', port: 'LOANS-MASTER', fac: 'TL', margin: 350, floor: 0.5, share: 0.024,
       prior: [prior('1M', 12000000, { id: '418901' })], current: [next('1M', 12000000, { id: '418951' })] },
     { id: 'A1004', name: 'Driftwood Health TLB', port: 'LOANS-MASTER', fac: 'TL', margin: 475, floor: 0.5, ...roll('3M', 9875000) },
     { id: 'A1005', name: 'Elmhurst Packaging TLB', port: 'LOANS-MASTER', fac: 'TL', margin: 375, floor: 0.5,
@@ -78,14 +78,16 @@
       current: [k('1M', 2000000, ['2026-10-20', '2026-11-20'], { id: '418704' })] },
 
     // ---- CLO-MASTER
-    { id: 'A1003', name: 'Copperline Software TL', port: 'CLO-MASTER', fac: 'TL', margin: 350, floor: 0.5,
+    { id: 'A1003', name: 'Copperline Software TL', port: 'CLO-MASTER', fac: 'TL', margin: 350, floor: 0.5, share: 0.016,
       prior: [prior('1M', 8000000, { id: '418901' })], current: [next('1M', 8000000, { id: '418951' })] },
     { id: 'A1019', name: 'Quarry Lane Materials TLB', port: 'CLO-MASTER', fac: 'TL', margin: 350, floor: 0.5, ...roll('1M', 4987500) },
     { id: 'A1020', name: 'Redfern Telecom TL', port: 'CLO-MASTER', fac: 'TL', margin: 450, floor: 0.75, ...roll('1M', 6650000) },
     { id: 'A1021', name: 'Saltmarsh Energy TLB', port: 'CLO-MASTER', fac: 'TL', margin: 400, floor: 0.5, ...roll('3M', 5500000) },
     { id: 'A1022', name: 'Tidewater Marine TLB', port: 'CLO-MASTER', fac: 'TL', margin: 425, floor: 0.5,
       prior: [prior('1M', 7000000), prior('1M', 5000000)], current: [next('1M', 4500000), next('3M', 7500000)] },
-    { id: 'A1023', name: 'Umber Analytics TL', port: 'CLO-MASTER', fac: 'TL', margin: 375, floor: 0.5, ...roll('1M', 3990000) },
+    // Sold 1,000,000 on the roll date: your position drops but the global amount does not.
+    { id: 'A1023', name: 'Umber Analytics TL', port: 'CLO-MASTER', fac: 'TL', margin: 375, floor: 0.5,
+      prior: [prior('1M', 3990000)], current: [next('1M', 2990000, { global: 199500000 })] },
     { id: 'A1024', name: 'Vantage Clinical TLB', port: 'CLO-MASTER', fac: 'TL', margin: 400, floor: 0.5, unmapped: true, ...roll('1M', 4000000) },
     { id: 'A1025', name: 'Willowbrook Pet TLB', port: 'CLO-MASTER', fac: 'TL', margin: 475, floor: 0.75, ...roll('1M', 7231812.5) },
     { id: 'A1026', name: 'Yarrow Brands TL', port: 'CLO-MASTER', fac: 'TL', margin: 350, floor: 0.5, ...roll('3M', 9000000) },
@@ -112,6 +114,10 @@
       unfunded: [6000000, 6000000], prior: [], current: [] },
     { id: 'A1032', name: 'Brightwater Labs RCF', port: 'CLO-MASTER', fac: 'RC', margin: 400, floor: 0, commitment: 5000000, unmapped: true,
       unfunded: [5000000, 5000000], prior: [], current: [] },
+
+    // PIK term loan: a month of interest at 10.50% is added to principal at the roll.
+    { id: 'A1034', name: 'Northgate Software PIK TL', port: 'LOANS-MASTER', fac: 'TL', margin: 600, floor: 1, interest: 'Capitalize',
+      prior: [prior('1M', 10000000)], current: [next('1M', 10087500)] },
   ];
 
   // ---- October 2026 unfunded fee export (ACT/360, period end inclusive).
@@ -143,16 +149,20 @@
       const funded = contracts.reduce((s, c) => s + c.amount, 0);
       const unfunded = a.unfunded ? a.unfunded[side === 'prior' ? 0 : 1] : 0;
       const commitment = a.fac === 'TL' ? funded : a.commitment;
+      // Your share of the facility; the global amount is your amount grossed up by it.
+      const share = a.share || (a.port === 'CLO-MASTER' ? 0.02 : 0.04);
+      const global = amount => Math.round(amount * 100 / share) / 100;
       const base = { AsOfDate: asOf, AllVuePortfolio: a.port, AssetID: a.id, AssetName: a.name, FacilityType: a.fac, Commitment: money(commitment) };
       contracts.forEach(c => rows.push({
         ...base, ContractID: c.id, ContractType: 'Funded', StartDate: c.period[0], EndDate: c.period[1],
-        Amount: money(c.amount), BaseRate: 'SOFR', Tenor: c.tenor, MarginBps: String(c.margin ?? a.margin),
+        Amount: money(c.amount), GlobalAmount: money(c.global ?? global(c.amount)),
+        RateType: 'Floating', InterestType: a.interest || 'Cash', BaseRate: 'SOFR', Tenor: c.tenor, MarginBps: String(c.margin ?? a.margin),
         FloorPct: a.floor.toFixed(2), PayFreq: FREQ[c.tenor], ResetFreq: FREQ[c.tenor], DayCount: 'ACT/360',
       }));
       if (a.fac !== 'TL') {
         rows.push({
           ...base, ContractID: `U${a.id.slice(1)}`, ContractType: 'Unfunded', StartDate: '2025-06-30', EndDate: '2030-06-30',
-          Amount: money(unfunded), BaseRate: '', Tenor: '', MarginBps: '50', FloorPct: '0.00',
+          Amount: money(unfunded), GlobalAmount: money(global(unfunded)), RateType: '', InterestType: '', BaseRate: '', Tenor: '', MarginBps: '50', FloorPct: '0.00',
           PayFreq: 'Quarterly', ResetFreq: '', DayCount: 'ACT/360',
         });
       }

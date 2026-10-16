@@ -27,10 +27,12 @@ npm test
    | many → 1 | Contract combine | Review |
    | many → many | Complex restructure | Review |
    | new contract, nothing expiring | Draw | Review |
-   | lower funded total | Paydown leg (booked first) | Review |
+   | lower funded total | Paydown (booked after any split or combine) | Review |
+   | higher funded total on a Capitalize/Partial contract | Capitalized (PIK) interest | Review |
+   | your position moves but the global amount doesn't | Trade, not a paydown or draw | Exception |
    | irregular period (stub/broken) | Flag | Review |
 
-   **Exceptions** block approval: unmapped asset or portfolio, PAM positions not tying to AllVue before the event, funded + unfunded ≠ commitment, term loan draws, draws larger than unfunded, missing contract lineage.
+   **Exceptions** block approval: missing global amounts, a position change with no global change (a trade), unmapped asset or portfolio, PAM positions not tying to AllVue before the event, funded + unfunded ≠ commitment, term loan draws, draws larger than unfunded, missing contract lineage.
 3. **Allocate.** Each amount is split across the PAM portfolios mapped to the AllVue portfolio, pro rata on their current PAM position (funded + unfunded), with largest-remainder rounding so the parts tie to the AllVue amount to the cent.
 4. **Review.** Approve or reject each event with a comment. Every decision goes to the audit log.
 5. **PAM file.** Approved events go into a numbered import file. Import it through PAM's import browser, then record which events loaded or failed. Failed events return to review with the PAM error.
@@ -56,24 +58,39 @@ Load these on **Setup and data** as CSV. Header names must match.
 
 | File | Columns |
 |---|---|
-| AllVue contracts (prior and current day) | `AsOfDate, AllVuePortfolio, AssetID, AssetName, FacilityType, ContractID, ContractType, StartDate, EndDate, Amount, Commitment, BaseRate, Tenor, MarginBps, FloorPct, PayFreq, ResetFreq, DayCount` |
+| AllVue contracts (prior and current day) | `AsOfDate, AllVuePortfolio, AssetID, AssetName, FacilityType, ContractID, ContractType, StartDate, EndDate, Amount, GlobalAmount, Commitment, RateType, InterestType, BaseRate, Tenor, MarginBps, FloorPct, PayFreq, ResetFreq, DayCount` |
 | Portfolio map | `AllVuePortfolio, PAMPortfolio` |
 | Tranche map | `AssetID, PAMTrancheID, FacilityType` |
 | PAM positions | `PAMPortfolio, PAMTrancheID, Funded, Unfunded` |
 | Contract lineage | `AllVueContractID, PAMContractID` |
 | AllVue unfunded fee export | `AllVuePortfolio, AssetID, AssetName, FacilityType, FeeType, PeriodStart, PeriodEnd, FeeRateBps, AverageUnfunded, DayCount, Amount, AllVueTransactionID` |
 
-`FacilityType` is `TL`, `RC` or `DDTL`. `ContractType` is `Funded` or `Unfunded` (one unfunded row per RC/DDTL tranche). Dates may be `YYYY-MM-DD` or `M/D/YYYY`.
+`Amount` is your position; `GlobalAmount` is the whole facility's amount for that contract. `RateType` is `Fixed` or `Floating`. `InterestType` is `Cash`, `Capitalize` or `Partial`. `FacilityType` is `TL`, `RC` or `DDTL`. `ContractType` is `Funded` or `Unfunded` (one unfunded row per RC/DDTL tranche). Dates may be `YYYY-MM-DD` or `M/D/YYYY`.
 
 ## PAM import file
 
-The output layout in `src/engine.js` (`LAYOUTS.pamImport`) is a **placeholder**:
+Each event becomes messages in PAM's load order, all in one file:
 
-`BatchID, Seq, EventKey, MessageType, PAMPortfolio, PAMTrancheID, PAMContractID, TargetContractRef, EffectiveDate, Amount, BaseRate, Tenor, MarginBps, FloorPct, PayFreq, ResetFreq, DayCount`
+1. **Create contract** (security master): one row per new contract with its terms. New contracts take the AllVue contract ID.
+2. For each step (combine, split, then paydown, draw or capitalized interest):
+   - one **global action** row per contract moved, in global units, to update the security master's global units (the transaction generate job stays off);
+   - **portfolio transactions**, one row per PAM portfolio, in your units.
+
+How events map to steps:
+
+| Event | Steps |
+|---|---|
+| Clean rollover | Nothing |
+| Rollover with paydown, draw or PIK, same terms | Paydown/draw/capitalize on the existing PAM contract |
+| Terms change (1:1) | Create → split old → new → any paydown/draw |
+| Split (1 → many) | Create each → split → any paydown/draw spread by size |
+| Combine (many → 1) | Create → combine → any paydown/draw |
+| Many → many | Create each → combine into the first new contract → split out to the others → any paydown/draw |
+| Draw into a new contract | Create → draw |
+
+PAM closes emptied contracts itself. Columns (placeholder): `BatchID, Seq, EventKey, Step, Level, MessageType, PAMPortfolio, PAMTrancheID, FromContractID, ToContractID, EffectiveDate, EndDate, Units, BaseRate, Tenor, MarginBps, FloorPct, PayFreq, ResetFreq, DayCount`. `Level` is `SMF`, `GLOBAL` or `PORTFOLIO`.
 
 Fee files use `BatchID, Seq, FeeKey, TransactionType, FeeType, PAMPortfolio, PAMTrancheID, PeriodStart, PeriodEnd, Amount, AllVueTransactionID` with transaction type `UNFUNDED_FEE`. Also a placeholder.
-
-Message types: `CONTRACT_CHANGE`, `CONTRACT_SPLIT`, `CONTRACT_COMBINE`, `CONTRACT_CLOSE`, `CONTRACT_OPEN`, `PAYDOWN`, `DRAW`. New PAM contracts are referenced as `AV-<contract id>` until PAM assigns an ID.
 
 ## Files
 

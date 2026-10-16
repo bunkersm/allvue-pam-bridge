@@ -6,7 +6,7 @@
   'use strict';
   const E = window.Engine;
   const S = window.SampleData;
-  const STORE_KEY = 'loan-event-bridge:v2';
+  const STORE_KEY = 'loan-event-bridge:v3';
 
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const money = E.formatMoney;
@@ -445,14 +445,15 @@
     const t = ev.totals;
     const amt = x => `${money(x.amount)} (${esc(x.tenor)})`;
     const diffText = diffs => diffs.map(d => `${esc(d.label)} ${esc(d.from)} → ${esc(d.to)}`).join(', ');
-    const legText = t.fundedDelta < 0 ? ` and was paid down by ${money(-t.fundedDelta)}` : t.fundedDelta > 0 ? ` with a draw of ${money(t.fundedDelta)}` : '';
+    const legText = t.fundedDelta < 0 ? ` and was paid down by ${money(-t.fundedDelta)}`
+      : t.fundedDelta > 0 ? (ev.legs.includes('CAPITALIZE') ? ` with ${money(t.fundedDelta)} of interest capitalized` : ` with a draw of ${money(t.fundedDelta)}`) : '';
     switch (ev.type) {
       case 'ROLLOVER':
         if (ev.route === 'auto') return `Contract ${c(ev.expired[0])} rolled into ${c(ev.added[0])} with the same amount and terms. PAM accrues from the contract attributes, so nothing is sent.`;
-        if (ev.legs.length) return `Contract ${c(ev.expired[0])} rolled into ${c(ev.added[0])}${legText}. Terms are unchanged, so PAM only needs the ${ev.legs[0] === 'PAYDOWN' ? 'paydown' : 'draw'}.`;
+        if (ev.legs.length) return `Contract ${c(ev.expired[0])} rolled into ${c(ev.added[0])}${legText}. Terms are unchanged, so the PAM contract carries on and only the ${E.TYPE_LABELS[ev.legs[0]].toLowerCase()} is booked.`;
         return `Contract ${c(ev.expired[0])} rolled into ${c(ev.added[0])} with the same terms, but a check needs your attention. Nothing is sent to PAM; approving confirms PAM's schedule is acceptable or that you will adjust it in PAM.`;
       case 'CONTRACT_CHANGE':
-        if (ev.expired.length) return `Contract ${c(ev.expired[0])} rolled into ${c(ev.added[0])}${legText} with new terms: ${diffText(ev.rollTermChanges)}. PAM gets a contract change on the existing contract.`;
+        if (ev.expired.length) return `Contract ${c(ev.expired[0])} rolled into ${c(ev.added[0])}${legText} with new terms: ${diffText(ev.rollTermChanges)}. PAM gets a new contract with the new terms and a 1:1 split onto it.`;
         return `Terms changed mid-period: ${ev.amended.map(a => `${c(a.cur)} ${diffText(a.diffs)}`).join('; ')}.`;
       case 'SPLIT':
         return `Contract ${c(ev.expired[0])} for ${money(ev.expired[0].amount)}${legText} split into ${ev.added.length} contracts: ${ev.added.map(x => `${c(x)} ${amt(x)}`).join(', ')}.`;
@@ -467,6 +468,8 @@
         return `Mid-period draw of ${money(t.fundedDelta)} on an existing contract.`;
       case 'REPAYMENT':
         return `${ev.expired.map(c).join(', ')} repaid in full (${money(-t.fundedDelta)}).`;
+      case 'CAPITALIZE':
+        return `${money(t.fundedDelta)} of interest capitalized mid-period on ${ev.amended.map(a => c(a.cur)).join(', ')}.`;
       default:
         return `Commitment changed from ${money(t.commitmentBefore)} to ${money(t.commitmentAfter)}.`;
     }
@@ -480,13 +483,13 @@
     ev.added.forEach(cn => rows.push({ side: 'New', c: cn, cmp: ref }));
     ev.amended.forEach(a => { rows.push({ side: 'Before', c: a.prev }); rows.push({ side: 'After', c: a.cur, cmp: a.prev }); });
     ev.unchanged.forEach(cn => rows.push({ side: 'Unchanged', c: cn }));
-    const fields = ['tenor', 'marginBps', 'floorPct', 'payFreq', 'resetFreq', 'dayCount'];
+    const fields = ['rateType', 'interestType', 'tenor', 'marginBps', 'floorPct', 'payFreq', 'resetFreq', 'dayCount'];
     const cell = (r, f, val, cls = '') => {
       const changed = r.cmp && String(r.cmp[f]) !== String(r.c[f]);
       return `<td class="${cls}${changed ? ' changed' : ''}">${esc(val)}</td>`;
     };
     return `<div class="table-wrap"><table>
-      <thead><tr><th></th><th>AllVue contract</th><th>PAM contract</th><th>Period</th><th class="num">Days</th><th class="num">Amount</th><th>Tenor</th><th class="num">Margin</th><th class="num">Floor</th><th>Pay</th><th>Reset</th><th>Day count</th></tr></thead>
+      <thead><tr><th></th><th>AllVue contract</th><th>PAM contract</th><th>Period</th><th class="num">Days</th><th class="num">Amount</th><th class="num">Global</th><th>Rate</th><th>Interest</th><th>Tenor</th><th class="num">Margin</th><th class="num">Floor</th><th>Pay</th><th>Reset</th><th>Day count</th></tr></thead>
       <tbody>${rows.map(r => {
         const days = E.daysBetween(r.c.startDate, r.c.endDate);
         const range = E.TENOR_DAYS[r.c.tenor];
@@ -500,6 +503,7 @@
           <td class="mono nowrap">${esc(r.c.startDate)} → ${esc(r.c.endDate)}</td>
           <td class="num${irregular ? ' changed' : ''}">${days}</td>
           ${cell(r, 'amount', money(r.c.amount), 'num')}
+          <td class="num">${money(r.c.globalAmount)}</td>
           ${fields.map(f => cell(r, f, f === 'floorPct' ? Number(r.c[f]).toFixed(2) : r.c[f], f === 'marginBps' || f === 'floorPct' ? 'num' : '')).join('')}
         </tr>`;
       }).join('')}</tbody></table></div>`;
@@ -515,7 +519,8 @@
       const parts = basis.map(b => (l.allocation ? l.allocation[b.pamPortfolio] ?? 0 : 0));
       const sum = parts.reduce((s, v) => s + v, 0);
       const ties = l.allocation && sum === l.amount;
-      return `<tr><td><span class="mono">${esc(l.messageType)}</span><div class="small muted">${esc(l.note)}</div></td>
+      const route = l.fromId || l.toId ? `${esc(l.fromId || '')}${l.fromId && l.toId ? ' → ' : ''}${esc(l.toId || '')}` : '';
+      return `<tr><td><span class="mono">${esc(l.messageType)}</span> <span class="mono small muted">${route}</span><div class="small muted">${esc(l.note)}</div></td>
         ${parts.map(p => `<td class="num">${money(p)}</td>`).join('')}
         <td class="num">${money(l.amount)}</td>
         <td class="small" style="color:${ties ? 'var(--ok)' : 'var(--bad)'}">${l.allocation ? (ties ? 'Ties to AllVue' : `Off by ${money(sum - l.amount)}`) : 'Not allocated'}</td></tr>`;
@@ -529,13 +534,17 @@
 
   function messageTable(ev) {
     if (!ev.messages.length) return '<p class="muted">No PAM messages for this event.</p>';
+    const levelLabel = { SMF: 'Security master', GLOBAL: 'Global action', PORTFOLIO: 'Portfolio' };
     return `<div class="table-wrap"><table>
-      <thead><tr><th>Message</th><th>PAM portfolio</th><th>PAM contract</th><th>Target ref</th><th class="num">Amount</th><th>Tenor</th><th class="num">Margin</th><th>Pay</th><th>Reset</th></tr></thead>
+      <thead><tr><th class="num">Step</th><th>Level</th><th>Message</th><th>PAM portfolio</th><th>From</th><th>To</th><th class="num">Units</th><th>Terms</th></tr></thead>
       <tbody>${ev.messages.map(m => `<tr>
-        <td class="mono">${esc(m.MessageType)}</td><td class="mono">${esc(m.PAMPortfolio)}</td><td class="mono">${esc(m.PAMContractID) || '<span class="muted">new</span>'}</td>
-        <td class="mono">${esc(m.TargetContractRef)}</td><td class="num">${money(E.toCents(m.Amount))}</td><td>${esc(m.Tenor)}</td>
-        <td class="num">${esc(m.MarginBps)}</td><td>${esc(m.PayFreq)}</td><td>${esc(m.ResetFreq)}</td></tr>`).join('')}</tbody>
-    </table></div>`;
+        <td class="num">${esc(m.Step)}</td><td class="small nowrap">${levelLabel[m.Level] || esc(m.Level)}</td><td class="mono nowrap">${esc(m.MessageType)}</td>
+        <td class="mono nowrap">${esc(m.PAMPortfolio) || '<span class="muted">n/a</span>'}</td>
+        <td class="mono nowrap">${esc(m.FromContractID)}</td><td class="mono nowrap">${esc(m.ToContractID)}</td>
+        <td class="num">${m.Units === '' ? '' : money(E.toCents(m.Units))}</td>
+        <td class="small" style="min-width:220px">${m.Level === 'SMF' ? esc(`${m.BaseRate} ${m.Tenor} + ${m.MarginBps} bps, floor ${m.FloorPct}, ${m.PayFreq}, ${m.DayCount}, ${m.EffectiveDate} to ${m.EndDate}`) : ''}</td></tr>`).join('')}</tbody>
+    </table></div>
+    <p class="small muted">Load order: new contracts first, then each step's global action, then its portfolio transactions. PAM closes emptied contracts itself.</p>`;
   }
 
   function actionsFor(ev) {
@@ -607,6 +616,7 @@
               <div><dt>Funded</dt><dd class="figure">${money(t.fundedBefore)} → ${money(t.fundedAfter)}</dd><dd class="small">${deltaCell(t.fundedDelta)}</dd></div>
               <div><dt>Unfunded</dt><dd class="figure">${money(t.unfundedBefore)} → ${money(t.unfundedAfter)}</dd></div>
               <div><dt>Commitment</dt><dd class="figure">${money(t.commitmentBefore)} → ${money(t.commitmentAfter)}</dd></div>
+              <div><dt>Global funded</dt><dd class="figure">${money(t.globalBefore)} → ${money(t.globalAfter)}</dd><dd class="small muted">${t.globalBefore ? `Your share ${(t.fundedBefore / t.globalBefore * 100).toFixed(4)}%` : ''}</dd></div>
               <div><dt>PAM tranche</dt><dd class="mono">${esc(ev.pamTrancheId) || 'Not mapped'}</dd></div>
             </dl></section>
           <section><h3>Allocation to PAM portfolios</h3>${allocationTable(ev)}</section>
@@ -831,9 +841,11 @@
         <div class="panel panel-pad">
           <ul class="rules">
             <li>For each AllVue portfolio and asset, contracts in the prior snapshot that are gone today are <b>expiring</b>; contracts that are new today are <b>new</b>.</li>
-            <li>1 expiring → 1 new with the same terms is a <b>rollover</b>. With different margin, tenor, floor, pay or reset frequency, or day count it is a <b>contract change</b>.</li>
+            <li>1 expiring → 1 new with the same terms is a <b>rollover</b>. With a different rate type, interest type, base rate, margin, tenor, floor, pay or reset frequency, or day count it is a <b>contract change</b>.</li>
             <li>1 → many is a <b>split</b>, many → 1 is a <b>combine</b>, many → many is a <b>complex restructure</b>. New contracts with nothing expiring are a <b>draw</b>.</li>
-            <li>A lower funded total is a <b>paydown</b>; a higher one is a <b>draw</b>. These are booked before any restructure message.</li>
+            <li>A lower funded total is a <b>paydown</b>; a higher one is a <b>draw</b>, or <b>capitalized interest</b> when the contract's interest type is Capitalize or Partial. These are booked after any split or combine.</li>
+            <li>PAM message order for each event: <b>create</b> new contracts (security master), then for each step a <b>global action</b> with global units, then <b>portfolio transactions</b>. A terms change is a new contract plus a 1:1 split; many → many is a combine then a split. New contracts take the AllVue contract ID.</li>
+            <li>If your position changes but the global amount does not, it is treated as a <b>trade</b>, not a paydown or draw. A change that isn't your share of the global change goes to review.</li>
             <li>A rollover is <b>clean</b> and needs no PAM message when amount and terms match and the new period is regular (${esc(tenors)}).</li>
             <li><b>Exceptions</b>: asset or portfolio not mapped, PAM positions not tying to AllVue before the event, funded plus unfunded not equal to commitment, term loan draws, draws larger than unfunded, missing PAM contract lineage.</li>
             <li>Amounts are allocated to PAM portfolios pro rata on their current position (funded plus unfunded), with largest-remainder rounding.</li>

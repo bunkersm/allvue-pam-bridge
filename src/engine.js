@@ -16,9 +16,9 @@
 
   // ---------------------------------------------------------------- constants
 
-  const TERM_FIELDS = ['baseRate', 'tenor', 'marginBps', 'floorPct', 'payFreq', 'resetFreq', 'dayCount'];
+  const TERM_FIELDS = ['rateType', 'interestType', 'baseRate', 'tenor', 'marginBps', 'floorPct', 'payFreq', 'resetFreq', 'dayCount'];
   const TERM_LABELS = {
-    baseRate: 'Base rate', tenor: 'Tenor', marginBps: 'Margin (bps)', floorPct: 'Floor (%)',
+    rateType: 'Rate type', interestType: 'Interest type', baseRate: 'Base rate', tenor: 'Tenor', marginBps: 'Margin (bps)', floorPct: 'Floor (%)',
     payFreq: 'Pay frequency', resetFreq: 'Reset frequency', dayCount: 'Day count',
   };
 
@@ -30,22 +30,25 @@
   const TYPE_LABELS = {
     ROLLOVER: 'Rollover', CONTRACT_CHANGE: 'Contract change', SPLIT: 'Contract split',
     COMBINE: 'Contract combine', COMPLEX: 'Complex restructure', PAYDOWN: 'Paydown',
-    REPAYMENT: 'Repayment', DRAW: 'Draw', COMMITMENT_CHANGE: 'Commitment change',
+    REPAYMENT: 'Repayment', DRAW: 'Draw', COMMITMENT_CHANGE: 'Commitment change', CAPITALIZE: 'Capitalized interest',
   };
+
+  // Interest types whose interest is added to principal (PIK) rather than paid in cash.
+  const CAPITALIZING = new Set(['CAPITALIZE', 'CAPITALIZED', 'PIK', 'PARTIAL', 'PARTIAL PIK']);
 
   // Input and output file layouts. The PAM layout is a placeholder until the
   // real import message formats are supplied.
   const LAYOUTS = {
     allvue: ['AsOfDate', 'AllVuePortfolio', 'AssetID', 'AssetName', 'FacilityType', 'ContractID', 'ContractType',
-      'StartDate', 'EndDate', 'Amount', 'Commitment', 'BaseRate', 'Tenor', 'MarginBps', 'FloorPct',
+      'StartDate', 'EndDate', 'Amount', 'GlobalAmount', 'Commitment', 'RateType', 'InterestType', 'BaseRate', 'Tenor', 'MarginBps', 'FloorPct',
       'PayFreq', 'ResetFreq', 'DayCount'],
     trancheMap: ['AssetID', 'PAMTrancheID', 'FacilityType'],
     portfolioMap: ['AllVuePortfolio', 'PAMPortfolio'],
     pamPositions: ['PAMPortfolio', 'PAMTrancheID', 'Funded', 'Unfunded'],
     lineage: ['AllVueContractID', 'PAMContractID'],
-    pamImport: ['BatchID', 'Seq', 'EventKey', 'MessageType', 'PAMPortfolio', 'PAMTrancheID', 'PAMContractID',
-      'TargetContractRef', 'EffectiveDate', 'Amount', 'BaseRate', 'Tenor', 'MarginBps', 'FloorPct',
-      'PayFreq', 'ResetFreq', 'DayCount'],
+    pamImport: ['BatchID', 'Seq', 'EventKey', 'Step', 'Level', 'MessageType', 'PAMPortfolio', 'PAMTrancheID',
+      'FromContractID', 'ToContractID', 'EffectiveDate', 'EndDate', 'Units', 'BaseRate', 'Tenor', 'MarginBps',
+      'FloorPct', 'PayFreq', 'ResetFreq', 'DayCount'],
     fees: ['AllVuePortfolio', 'AssetID', 'AssetName', 'FacilityType', 'FeeType', 'PeriodStart', 'PeriodEnd',
       'FeeRateBps', 'AverageUnfunded', 'DayCount', 'Amount', 'AllVueTransactionID'],
     pamFeeImport: ['BatchID', 'Seq', 'FeeKey', 'TransactionType', 'FeeType', 'PAMPortfolio', 'PAMTrancheID',
@@ -156,7 +159,10 @@
         startDate: normalizeDate(r.StartDate),
         endDate: normalizeDate(r.EndDate),
         amount: toCents(r.Amount),
+        globalAmount: toCents(r.GlobalAmount),
         commitment: toCents(r.Commitment),
+        rateType: String(r.RateType || '').trim(),
+        interestType: String(r.InterestType || '').trim(),
         baseRate: String(r.BaseRate || '').trim(),
         tenor: String(r.Tenor || '').trim().toUpperCase(),
         marginBps: Number(r.MarginBps || 0),
@@ -318,9 +324,13 @@
     else type = 'COMPLEX';
 
     const rollsAtPeriodEnd = expired.length > 0 && added.length > 0;
+    // An increase on a contract that capitalizes interest is PIK, not a draw.
+    const capitalizing = fundedDelta > 0
+      && [...expired, ...amended.map(a => a.prev)].some(c => CAPITALIZING.has(c.interestType.toUpperCase()));
+    if (capitalizing && type === 'DRAW' && !added.length) type = 'CAPITALIZE';
     const legs = [];
     if (rollsAtPeriodEnd && fundedDelta < 0) legs.push('PAYDOWN');
-    if (rollsAtPeriodEnd && fundedDelta > 0) legs.push('DRAW');
+    if (rollsAtPeriodEnd && fundedDelta > 0) legs.push(capitalizing ? 'CAPITALIZE' : 'DRAW');
 
     const effectiveDate = added.length
       ? added.map(c => c.startDate).sort()[0]
@@ -344,17 +354,19 @@
     if (facilityType === 'TL' && unfundedAfter !== 0) {
       exception(`Term loan shows an unfunded amount of ${money(unfundedAfter)}. Term loans should be fully funded.`);
     }
-    if (facilityType === 'TL' && fundedDelta > 0) {
+    if (capitalizing) {
+      review(`Funded amount went up by ${money(fundedDelta)} on a contract that capitalizes interest. Booked as capitalized (PIK) interest; check it against the agent notice.`);
+    } else if (facilityType === 'TL' && fundedDelta > 0) {
       exception(`Term loan funded amount went up by ${money(fundedDelta)}. Term loans do not draw, so check for an add-on, an incremental or a trade.`);
     }
-    if (facilityType !== 'TL' && fundedDelta > unfundedBefore) {
+    if (!capitalizing && facilityType !== 'TL' && fundedDelta > unfundedBefore) {
       exception(`Draw of ${money(fundedDelta)} is larger than the prior unfunded amount of ${money(unfundedBefore)}.`);
     }
 
     if (g.current.length && commitmentAfter !== commitmentBefore) {
       const reduction = commitmentBefore - commitmentAfter;
       const permanentPaydown = fundedDelta < 0 && reduction === -fundedDelta;
-      if (facilityType === 'TL' && permanentPaydown) { /* term loan commitment moves with par */ }
+      if (facilityType === 'TL' && (permanentPaydown || (capitalizing && -reduction === fundedDelta))) { /* term loan commitment moves with par */ }
       else if (facilityType === 'DDTL' && permanentPaydown) info('Commitment reduced by the paydown amount. Delayed draw repayments are permanent.');
       else if (facilityType === 'RC') review(`Revolver commitment changed from ${money(commitmentBefore)} to ${money(commitmentAfter)}. Confirm whether this is a permanent reduction or an upsize.`);
       else review(`Commitment changed from ${money(commitmentBefore)} to ${money(commitmentAfter)}.`);
@@ -364,6 +376,13 @@
     }
 
     added.forEach(c => {
+      const rt = c.rateType.toUpperCase();
+      if (rt && rt !== 'FIXED' && rt !== 'FLOATING') review(`Contract ${c.contractId} has rate type "${c.rateType}". Expected Fixed or Floating.`);
+      if (rt === 'FLOATING' && !c.baseRate) review(`Floating contract ${c.contractId} has no base rate.`);
+      const it = c.interestType.toUpperCase();
+      if (it && it !== 'CASH' && !CAPITALIZING.has(it)) review(`Contract ${c.contractId} has interest type "${c.interestType}". Expected Cash, Capitalize or Partial.`);
+    });
+    added.forEach(c => {
       const days = daysBetween(c.startDate, c.endDate);
       const range = TENOR_DAYS[c.tenor];
       if (range && (days < range[0] || days > range[1])) {
@@ -372,7 +391,7 @@
     });
 
     if (type === 'COMPLEX') {
-      review(`${expired.length} contracts roll into ${added.length} with different amounts. This prototype writes close and open messages; confirm that is how PAM should book it.`);
+      review(`${expired.length} contracts roll into ${added.length}. Booked as a combine into contract ${added[0].contractId}, then a split out to the others. Check the amounts against the agent notice.`);
     }
     if (type === 'REPAYMENT' && !g.current.length) {
       review('The position is no longer in the AllVue export. Confirm this is a repayment and not a sale or transfer.');
@@ -380,8 +399,28 @@
     if (rollsAtPeriodEnd && amended.length) {
       info('Other contracts on this tranche also changed and are included in this event.');
     }
-    if (type === 'COMBINE' && fundedDelta !== 0) {
-      info(`The ${fundedDelta < 0 ? 'paydown' : 'draw'} is booked against the first source contract before the combine.`);
+    if ((type === 'SPLIT' || type === 'COMPLEX') && fundedDelta !== 0) {
+      info(`The ${fundedDelta < 0 ? 'paydown' : 'draw'} is booked after the restructure, spread across the new contracts in proportion to their size.`);
+    }
+
+    // ---- global amounts: needed for PAM's global actions, and they separate real
+    // paydowns and draws from your own trades.
+    const gsum = rows => rows.reduce((t, r) => t + r.globalAmount, 0);
+    const globalBefore = gsum(priorFunded);
+    const globalAfter = gsum(currentFunded);
+    const globalDelta = globalAfter - globalBefore;
+    const missingGlobal = [...priorFunded, ...currentFunded].filter(c => c.amount !== 0 && c.globalAmount <= 0);
+    if (missingGlobal.length) {
+      exception(`No global amount for contract ${[...new Set(missingGlobal.map(c => c.contractId))].join(', ')}. PAM's global action needs it.`);
+    } else if (globalBefore > 0 && g.current.length) {
+      if (fundedDelta !== 0 && globalDelta === 0) {
+        exception(`Your funded position changed by ${money(fundedDelta)} but the global amount did not. That looks like a ${fundedDelta < 0 ? 'sale' : 'purchase'}, not a ${fundedDelta < 0 ? 'paydown' : 'draw'}. Book the trade in PAM instead.`);
+      } else if (globalDelta !== 0) {
+        const expectedDelta = Math.round(globalDelta * fundedBefore / globalBefore);
+        if (Math.abs(fundedDelta - expectedDelta) > Math.max(500, Math.abs(expectedDelta) * 0.0001)) {
+          review(`Your change of ${money(fundedDelta)} is not your ${(fundedBefore / globalBefore * 100).toFixed(4)}% share of the global change of ${money(globalDelta)} (expected ${money(expectedDelta)}). There may be a trade on the same day; check before booking.`);
+        }
+      }
     }
 
     const pamIdOf = c => ctx.lineage[c.contractId] || '';
@@ -418,8 +457,13 @@
       : type === 'ROLLOVER' && !legs.length && !amended.length && !hasReview ? 'auto'
         : 'review';
 
-    // ---- PAM message lines (before allocation)
-    const lines = buildLines({ type, expired, added, amended, fundedDelta, pamIdOf, effectiveDate });
+    // ---- PAM messages
+    const newIdOf = c => {
+      // New PAM contracts take the AllVue contract ID, unless PAM already uses that ID for the old contract.
+      const pamId = pamIdOf(c);
+      return pamId === c.contractId ? `${c.contractId}-${effectiveDate.replace(/-/g, '')}` : c.contractId;
+    };
+    const plan = buildPlan({ type, expired, added, amended, fundedDelta, globalDelta, capitalizing, pamIdOf, newIdOf });
 
     const key = [
       allvuePortfolio, assetId, effectiveDate,
@@ -427,98 +471,105 @@
       amended.length ? '~' + amended.map(a => a.cur.contractId).sort().join('+') : '',
     ].join('|').replace(/\|$/, '');
 
-    const messages = [];
     const weights = allocationBasis.filter(b => b.weight > 0).map(b => ({ key: b.pamPortfolio, weight: b.weight }));
-    lines.forEach(line => {
-      line.allocation = weights.length && tranche ? allocate(line.amount, weights) : null;
-      if (!line.allocation) return;
-      weights.forEach(w => {
-        messages.push({
-          EventKey: key,
-          MessageType: line.messageType,
-          PAMPortfolio: w.key,
-          PAMTrancheID: tranche.pamTrancheId,
-          PAMContractID: line.pamContractId,
-          TargetContractRef: line.targetRef,
-          EffectiveDate: effectiveDate,
-          Amount: fromCents(line.allocation[w.key]),
-          BaseRate: line.terms.baseRate,
-          Tenor: line.terms.tenor,
-          MarginBps: line.terms.marginBps,
-          FloorPct: line.terms.floorPct,
-          PayFreq: line.terms.payFreq,
-          ResetFreq: line.terms.resetFreq,
-          DayCount: line.terms.dayCount,
-        });
-      });
-    });
+    const canBuild = Boolean(tranche && weights.length);
+    if (canBuild) plan.steps.forEach(step => allocateStep(step, weights));
+    const messages = canBuild ? planMessages(plan, { key, effectiveDate, pamTrancheId: tranche.pamTrancheId, weights }) : [];
+    const lines = plan.steps.flatMap(step => step.lines);
 
     // ---- lineage: which PAM contract each new AllVue contract represents
-    const lineageUpdates = [];
-    if ((type === 'ROLLOVER' || type === 'CONTRACT_CHANGE') && expired.length === 1 && added.length === 1) {
-      lineageUpdates.push({ allvueContractId: added[0].contractId, pamContractId: pamIdOf(expired[0]) });
-    } else {
-      added.forEach(c => lineageUpdates.push({ allvueContractId: c.contractId, pamContractId: newRef(c) }));
-    }
+    const lineageUpdates = plan.lineage;
 
     return {
       key, allvuePortfolio, assetId, assetName, facilityType, effectiveDate,
       type, typeLabel: TYPE_LABELS[type], legs, route, flags,
       expired, added, amended, unchanged, rollTermChanges,
-      totals: { fundedBefore, fundedAfter, fundedDelta, unfundedBefore, unfundedAfter, commitmentBefore, commitmentAfter },
+      totals: { fundedBefore, fundedAfter, fundedDelta, unfundedBefore, unfundedAfter, commitmentBefore, commitmentAfter, globalBefore, globalAfter, globalDelta },
       pamTrancheId: tranche ? tranche.pamTrancheId : '',
-      allocationBasis, lines, messages, lineageUpdates,
+      allocationBasis, creates: plan.creates, steps: plan.steps, lines, messages, lineageUpdates,
     };
   }
 
-  // New PAM contracts are referenced by their AllVue contract ID until PAM assigns its own.
-  const newRef = c => `AV-${c.contractId}`;
+  /**
+   * Works out what PAM has to do for an event, in PAM's order:
+   *   1. create each new contract in the security master,
+   *   2. move units: a combine and/or a split (many → many is a combine into the
+   *      first new contract, then a split out to the others),
+   *   3. paydown or draw on the resulting contracts.
+   * Each step in 2 and 3 becomes one global action per line plus portfolio
+   * transactions. PAM closes emptied contracts itself, so there are no closes.
+   */
+  function buildPlan({ type, expired, added, amended, fundedDelta, globalDelta, capitalizing, pamIdOf, newIdOf }) {
+    const creates = [];
+    const steps = [];
+    const lineage = [];
+    const step = (action, lines) => { if (lines.length) steps.push({ action, lines }); };
+    const line = (messageType, fromId, toId, amount, globalAmount, note) => ({ messageType, fromId, toId, amount, globalAmount, note });
+    const create = c => { const id = newIdOf(c); creates.push({ ...c, pamContractId: id }); lineage.push({ allvueContractId: c.contractId, pamContractId: id }); return id; };
 
-  function buildLines({ type, expired, added, amended, fundedDelta, pamIdOf, effectiveDate }) {
-    const lines = [];
-    const line = (messageType, pamContractId, targetRef, amount, terms, note) =>
-      lines.push({ messageType, pamContractId, targetRef, amount, terms: termsOf(terms), effectiveDate, note });
-
-    // Amount legs are booked against the source contract before any restructure,
-    // so the restructure messages carry the post-paydown or post-draw amounts.
-    const amountLeg = source => {
-      if (fundedDelta < 0) line('PAYDOWN', pamIdOf(source), '', -fundedDelta, source, 'Paydown at rollover');
-      if (fundedDelta > 0) line('DRAW', pamIdOf(source), '', fundedDelta, source, 'Draw at rollover');
+    // Amount change after the restructure, spread over the target contracts by size.
+    const legs = (targets, note) => {
+      if (!fundedDelta) return;
+      const pos = allocate(fundedDelta, targets.map((t, i) => ({ key: i, weight: Math.max(t.amount, 1) })));
+      const glob = allocate(globalDelta, targets.map((t, i) => ({ key: i, weight: Math.max(t.globalAmount, 1) })));
+      const kind = fundedDelta < 0 ? 'PAYDOWN' : capitalizing ? 'CAPITALIZE' : 'DRAW';
+      const text = kind === 'CAPITALIZE' ? note.replace(/^(Paydown|Draw)/, 'Capitalized interest') : note;
+      step(kind, targets.map((t, i) => kind === 'PAYDOWN'
+        ? line('PAYDOWN', t.id, '', -pos[i], -glob[i], text)
+        : line(kind, '', t.id, pos[i], glob[i], text)).filter(l => l.amount !== 0));
+      return { pos, glob };
+    };
+    const spread = (targets) => {
+      // What each new contract holds before the paydown or draw is applied.
+      if (!fundedDelta) return targets.map(t => ({ amount: t.amount, globalAmount: t.globalAmount }));
+      const pos = allocate(fundedDelta, targets.map((t, i) => ({ key: i, weight: Math.max(t.amount, 1) })));
+      const glob = allocate(globalDelta, targets.map((t, i) => ({ key: i, weight: Math.max(t.globalAmount, 1) })));
+      return targets.map((t, i) => ({ amount: t.amount - pos[i], globalAmount: t.globalAmount - glob[i] }));
     };
 
     switch (type) {
-      case 'ROLLOVER':
-        // Same terms: PAM needs nothing for the roll itself, only any amount leg.
-        if (expired.length && added.length) amountLeg(expired[0]);
-        break;
-      case 'CONTRACT_CHANGE':
-        if (expired.length && added.length) {
-          amountLeg(expired[0]);
-          line('CONTRACT_CHANGE', pamIdOf(expired[0]), '', added[0].amount, added[0], 'New terms from rollover');
-        }
-        break;
-      case 'SPLIT':
-        amountLeg(expired[0]);
-        added.forEach(c => line('CONTRACT_SPLIT', pamIdOf(expired[0]), newRef(c), c.amount, c, `Split into ${c.tenor} contract`));
-        break;
-      case 'COMBINE': {
-        amountLeg(expired[0]);
-        const target = added[0];
-        expired.forEach((c, i) => {
-          const amount = i === 0 ? c.amount + fundedDelta : c.amount;
-          line('CONTRACT_COMBINE', pamIdOf(c), newRef(target), amount, target, 'Combine into one contract');
-        });
+      case 'ROLLOVER': {
+        // Same terms: the PAM contract carries on, so only an amount change is booked.
+        const pamId = pamIdOf(expired[0]);
+        lineage.push({ allvueContractId: added[0].contractId, pamContractId: pamId });
+        legs([{ id: pamId, amount: added[0].amount, globalAmount: added[0].globalAmount }], fundedDelta < 0 ? 'Paydown at rollover' : 'Draw at rollover');
         break;
       }
-      case 'COMPLEX':
-        expired.forEach(c => line('CONTRACT_CLOSE', pamIdOf(c), '', c.amount, c, 'Close expiring contract'));
-        added.forEach(c => line('CONTRACT_OPEN', '', newRef(c), c.amount, c, 'Open new contract'));
+      case 'CONTRACT_CHANGE':
+        if (expired.length && added.length) {
+          const id = create(added[0]);
+          step('CONTRACT_SPLIT', [line('CONTRACT_SPLIT', pamIdOf(expired[0]), id, expired[0].amount, expired[0].globalAmount, 'New terms: 1:1 split to the new contract')]);
+          legs([{ id, amount: added[0].amount, globalAmount: added[0].globalAmount }], fundedDelta < 0 ? 'Paydown after the split' : 'Draw after the split');
+        }
         break;
-      case 'DRAW':
-        added.forEach(c => line('DRAW', '', newRef(c), c.amount, c, 'Draw into new contract'));
+      case 'SPLIT': {
+        const ids = added.map(create);
+        const pre = spread(added);
+        step('CONTRACT_SPLIT', added.map((c, i) => line('CONTRACT_SPLIT', pamIdOf(expired[0]), ids[i], pre[i].amount, pre[i].globalAmount, `Split into ${c.tenor} contract ${c.contractId}`)));
+        legs(added.map((c, i) => ({ id: ids[i], amount: c.amount, globalAmount: c.globalAmount })), fundedDelta < 0 ? 'Paydown after the split' : 'Draw after the split');
         break;
+      }
+      case 'COMBINE': {
+        const id = create(added[0]);
+        step('CONTRACT_COMBINE', expired.map(c => line('CONTRACT_COMBINE', pamIdOf(c), id, c.amount, c.globalAmount, `Combine ${c.contractId} into ${added[0].contractId}`)));
+        legs([{ id, amount: added[0].amount, globalAmount: added[0].globalAmount }], fundedDelta < 0 ? 'Paydown after the combine' : 'Draw after the combine');
+        break;
+      }
+      case 'COMPLEX': {
+        const ids = added.map(create);
+        const pre = spread(added);
+        step('CONTRACT_COMBINE', expired.map(c => line('CONTRACT_COMBINE', pamIdOf(c), ids[0], c.amount, c.globalAmount, `Combine ${c.contractId} into ${added[0].contractId}`)));
+        step('CONTRACT_SPLIT', added.slice(1).map((c, j) => line('CONTRACT_SPLIT', ids[0], ids[j + 1], pre[j + 1].amount, pre[j + 1].globalAmount, `Split from ${added[0].contractId} into ${c.contractId}`)));
+        legs(added.map((c, i) => ({ id: ids[i], amount: c.amount, globalAmount: c.globalAmount })), fundedDelta < 0 ? 'Paydown after the restructure' : 'Draw after the restructure');
+        break;
+      }
+      case 'DRAW': {
+        added.forEach(create);
+        step('DRAW', added.map(c => line('DRAW', '', newIdOf(c), c.amount, c.globalAmount, `Draw into new contract ${c.contractId}`)));
+        break;
+      }
       case 'REPAYMENT':
-        expired.forEach(c => line('PAYDOWN', pamIdOf(c), '', c.amount, c, 'Repaid in full'));
+        step('PAYDOWN', expired.map(c => line('PAYDOWN', pamIdOf(c), '', c.amount, c.globalAmount, 'Repaid in full')));
         break;
       default:
         break;
@@ -526,13 +577,72 @@
 
     // Mid-period changes to contracts that did not roll.
     amended.forEach(a => {
-      if (a.amountDelta < 0) line('PAYDOWN', pamIdOf(a.prev), '', -a.amountDelta, a.prev, 'Mid-period paydown');
-      if (a.diffs.length) line('CONTRACT_CHANGE', pamIdOf(a.prev), '', a.cur.amount, a.cur, 'Mid-period term change');
-      if (a.amountDelta > 0) line('DRAW', pamIdOf(a.prev), '', a.amountDelta, a.cur, 'Mid-period draw');
+      const gDelta = a.cur.globalAmount - a.prev.globalAmount;
+      let id = pamIdOf(a.prev);
+      if (a.diffs.length) {
+        id = create(a.cur);
+        step('CONTRACT_SPLIT', [line('CONTRACT_SPLIT', pamIdOf(a.prev), id, a.prev.amount, a.prev.globalAmount, 'Mid-period term change: 1:1 split to a new contract')]);
+      }
+      if (a.amountDelta < 0) step('PAYDOWN', [line('PAYDOWN', id, '', -a.amountDelta, -gDelta, 'Mid-period paydown')]);
+      if (a.amountDelta > 0) {
+        const kind = capitalizing ? 'CAPITALIZE' : 'DRAW';
+        step(kind, [line(kind, '', id, a.amountDelta, gDelta, capitalizing ? 'Capitalized interest' : 'Mid-period draw')]);
+      }
     });
-    return lines;
+    return { creates, steps, lineage };
   }
 
+  /**
+   * Splits each line of a step across PAM portfolios. Lines that split one
+   * source contract into several are allocated together so that each
+   * portfolio's pieces add back to its holding of the source and each target
+   * contract adds back to its AllVue amount.
+   */
+  function allocateStep(step, weights) {
+    const bySource = new Map();
+    step.lines.forEach(l => {
+      const k = step.action === 'CONTRACT_SPLIT' ? l.fromId : Symbol('own');
+      if (!bySource.has(k)) bySource.set(k, []);
+      bySource.get(k).push(l);
+    });
+    for (const group of bySource.values()) {
+      if (group.length === 1) { group[0].allocation = allocate(group[0].amount, weights); continue; }
+      const holding = allocate(group.reduce((t, l) => t + l.amount, 0), weights);
+      const used = Object.fromEntries(weights.map(w => [w.key, 0]));
+      group.forEach((l, i) => {
+        if (i < group.length - 1) {
+          l.allocation = allocate(l.amount, weights);
+          weights.forEach(w => { used[w.key] += l.allocation[w.key]; });
+        } else {
+          l.allocation = Object.fromEntries(weights.map(w => [w.key, holding[w.key] - used[w.key]]));
+        }
+      });
+    }
+  }
+
+  /** Message rows in load order: contract creates, then per step one global action per line, then portfolio transactions. */
+  function planMessages(plan, { key, effectiveDate, pamTrancheId, weights }) {
+    const rows = [];
+    const blankTerms = { BaseRate: '', Tenor: '', MarginBps: '', FloorPct: '', PayFreq: '', ResetFreq: '', DayCount: '' };
+    let stepNo = 0;
+    if (plan.creates.length) {
+      stepNo++;
+      plan.creates.forEach(c => rows.push({
+        EventKey: key, Step: stepNo, Level: 'SMF', MessageType: 'CONTRACT_CREATE', PAMPortfolio: '', PAMTrancheID: pamTrancheId,
+        FromContractID: '', ToContractID: c.pamContractId, EffectiveDate: c.startDate, EndDate: c.endDate, Units: '',
+        BaseRate: c.baseRate, Tenor: c.tenor, MarginBps: c.marginBps, FloorPct: c.floorPct, PayFreq: c.payFreq, ResetFreq: c.resetFreq, DayCount: c.dayCount,
+      }));
+    }
+    plan.steps.forEach(step => {
+      stepNo++;
+      const base = l => ({ EventKey: key, Step: stepNo, MessageType: l.messageType, PAMTrancheID: pamTrancheId, FromContractID: l.fromId, ToContractID: l.toId, EffectiveDate: effectiveDate, EndDate: '', ...blankTerms });
+      step.lines.forEach(l => { if (l.globalAmount !== 0) rows.push({ ...base(l), Level: 'GLOBAL', PAMPortfolio: '', Units: fromCents(l.globalAmount) }); });
+      step.lines.forEach(l => weights.forEach(w => {
+        if (l.allocation[w.key] !== 0) rows.push({ ...base(l), Level: 'PORTFOLIO', PAMPortfolio: w.key, Units: fromCents(l.allocation[w.key]) });
+      }));
+    });
+    return rows;
+  }
 
   // ---------------------------------------------------------------- unfunded fees
 
