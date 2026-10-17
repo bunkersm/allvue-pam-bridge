@@ -74,7 +74,7 @@ Contract events produce a PAM message file (`PAM_IMPORT_<batch>.txt`) in PAM's i
 1. **Create contract** (security master), one per new contract. New contracts take the AllVue contract ID. *The create message format hasn't been supplied yet, so these appear as a "before loading" checklist on the file.*
 2. For each step (combine, split, then paydown, draw or capitalized interest):
    - one **`BANKLOANACTION`** global action, with signed global units per contract (sources negative, targets positive). Types: 8 contract split, 9 contract combine; 6 contract redemption, 4 drawdown and 10 interest capitalization are assumed for paydowns, draws and PIK and need confirming. The transaction generate job stays off.
-   - one **`TaCONTRACTSPLIT`** per PAM portfolio (the source contract in `CONTRACTSECID`, targets in `CONTRACTALLOC`) or **`TaCONTRACTCOMBINE`** (the target in `CONTRACTSECID`, sources in `CONTRACTALLOC`), with `BNK()` from the portfolio map, a transaction number and a `CCID`. *Portfolio paydown, draw and capitalization formats haven't been supplied yet, so these appear as an "after loading" checklist.*
+   - one **`TaCONTRACTSPLIT`** per PAM portfolio (the source contract in `CONTRACTSECID`, targets in `CONTRACTALLOC`) or **`TaCONTRACTCOMBINE`** (the target in `CONTRACTSECID`, sources in `CONTRACTALLOC`), with `BNK()` from the portfolio map and a `CCID`. The transaction number is left blank; PAM assigns it on `ADD`. *Portfolio paydown, draw and capitalization formats haven't been supplied yet, so these appear as an "after loading" checklist.*
 
 | Event | Steps |
 |---|---|
@@ -86,7 +86,7 @@ Contract events produce a PAM message file (`PAM_IMPORT_<batch>.txt`) in PAM's i
 | Many → many | Create each → combine into the first new contract → split out to the others → any paydown/draw |
 | Draw into a new contract | Create → draw |
 
-PAM closes emptied contracts itself. Transaction numbers run on from the **Next PAM transaction number** on the Setup tab. The `TRDR()` block on splits (method `M`, the tranche maturity date, price 100) and `SETMTHD(11)` are copied from PAM's sample and should be confirmed. Security ID types are 3 for the facility (the PAM tranche ID) and 26 for contracts; see `PAM` in `src/engine.js`.
+PAM closes emptied contracts itself. The `TRDR()` block on splits (method `M`, the tranche maturity date, price 100) and `SETMTHD(11)` are copied from PAM's sample and should be confirmed. Security ID types are 3 for the facility (the PAM tranche ID) and 26 for contracts; see `PAM` in `src/engine.js`.
 
 Fee files use `BatchID, Seq, FeeKey, TransactionType, FeeType, PAMPortfolio, PAMTrancheID, PeriodStart, PeriodEnd, Amount, AllVueTransactionID` with transaction type `UNFUNDED_FEE`. Also a placeholder.
 

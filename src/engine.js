@@ -721,7 +721,7 @@
   const pamUnits = cents => `${fromCents(cents)}0000`;
 
   /** Writes one PAM message in PAM's import syntax. */
-  function pamMessageText(m, { txnNumber = '', ccid = '' } = {}) {
+  function pamMessageText(m, { ccid = '' } = {}) {
     const fac = `SecID(${PAM.facilityIdType},${m.facilityId})`;
     const cid = id => `(${PAM.contractIdType},${id})`;
     const ccidText = `CCID(${ccid},${pamDate(m.effectiveDate)},0)`;
@@ -744,13 +744,13 @@
     const alloc = ['CONTRACTALLOC(', 'ADD,', m.allocs.map(a => `CONTRACTALLOCREC(SecID${cid(a.contractId)},${pamUnits(a.units)})`).join(',\n'), '),'].join('\n');
     if (m.type === 'CONTRACT_COMBINE') {
       return [
-        'TaCONTRACTCOMBINE(', 'ADD,', `${txnNumber},`, `${fac},`, `CONTRACTSECID${cid(m.contractId)},`,
+        'TaCONTRACTCOMBINE(', 'ADD,', ',', `${fac},`, `CONTRACTSECID${cid(m.contractId)},`,
         `${pamDate(m.effectiveDate)},`, `${pamDate(m.effectiveDate)},`, `${m.pamPortfolio},`, `${bnk},`,
         `${pamUnits(m.unitsExchanged)},`, alloc, ccidText, ')',
       ].join('\n');
     }
     return [
-      'TaCONTRACTSPLIT(', 'ADD,', `${txnNumber},`, `${fac},`, `CONTRACTSECID${cid(m.contractId)},`,
+      'TaCONTRACTSPLIT(', 'ADD,', ',', `${fac},`, `CONTRACTSECID${cid(m.contractId)},`,
       `${pamDate(m.effectiveDate)},`, `${pamDate(m.effectiveDate)},`, `${m.pamPortfolio},`, `${bnk},`,
       `${pamUnits(m.unitsExchanged)},`, '0.000000,', ',', alloc,
       `SETMTHD(${PAM.settlementMethod}),`,
@@ -771,11 +771,11 @@
   }
 
   /**
-   * Builds one PAM import file from approved events. Transaction numbers run
-   * on from startTxn; each portfolio message gets a CCID of batch-sequence.
+   * Builds one PAM import file from approved events. The transaction number is
+   * left blank because PAM assigns it on ADD; each portfolio message gets a
+   * CCID of batch-sequence.
    */
-  function buildPamFile(events, { batchId, startTxn }) {
-    let txn = Number(startTxn) || 1;
+  function buildPamFile(events, { batchId }) {
     let seq = 0;
     const blocks = [];
     const before = [];
@@ -783,10 +783,10 @@
     events.forEach(ev => ev.messages.forEach(m => {
       if (m.manual) { (m.level === 'SMF' ? before : after).push({ eventKey: ev.key, text: manualStepText(m) }); return; }
       seq++;
-      const opts = m.level === 'PORTFOLIO' ? { txnNumber: txn++, ccid: `${batchId}-${String(seq).padStart(4, '0')}` } : {};
+      const opts = m.level === 'PORTFOLIO' ? { ccid: `${batchId}-${String(seq).padStart(4, '0')}` } : {};
       blocks.push(pamMessageText(m, opts));
     }));
-    return { text: blocks.join('\n\n') + (blocks.length ? '\n' : ''), messageCount: blocks.length, before, after, nextTxn: txn };
+    return { text: blocks.join('\n\n') + (blocks.length ? '\n' : ''), messageCount: blocks.length, before, after };
   }
 
   // ---------------------------------------------------------------- unfunded fees

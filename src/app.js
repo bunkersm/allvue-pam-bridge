@@ -85,7 +85,6 @@
       fees: [],
       feeFilter: 'review',
       lastFeeRun: null,
-      nextTxn: 9000001,
     };
   }
 
@@ -306,8 +305,7 @@
     let rows = [];
     if (isFee) rows = E.buildBatchRows(items, id);
     else {
-      file = E.buildPamFile(items, { batchId: id, startTxn: state.nextTxn });
-      state.nextTxn = file.nextTxn;
+      file = E.buildPamFile(items, { batchId: id });
     }
     const count = isFee ? rows.length : file.messageCount;
     const fileName = isFee ? `PAM_FEES_${id}.csv` : `PAM_IMPORT_${id}.txt`;
@@ -557,11 +555,11 @@
     const after = ev.messages.filter(m => m.manual && m.level !== 'SMF');
     const blocks = fileMsgs(ev).map(m => `<div class="stack">
         <div class="small"><b>Step ${m.step}</b> · ${levelLabel[m.level]}${typeLabel[m.type] ? `, ${typeLabel[m.type]}` : ''}${m.pamPortfolio ? ` · <span class="mono">${esc(m.pamPortfolio)}</span>` : ''}${m.level === 'GLOBAL' ? ` · type ${m.actionType}` : ''}</div>
-        <pre class="file">${esc(E.pamMessageText(m, { txnNumber: 'TBD', ccid: 'TBD' }))}</pre></div>`).join('');
+        <pre class="file">${esc(E.pamMessageText(m, { ccid: 'TBD' }))}</pre></div>`).join('');
     return `${checklist('Before loading: create these contracts in PAM', before.map(m => ({ text: E.manualStepText(m) })))}
       ${blocks || '<p class="muted">No messages go in the PAM file for this event.</p>'}
       ${checklist('After loading: book these in PAM', after.map(m => ({ text: E.manualStepText(m) })))}
-      <p class="small muted">Load order: each step's global action, then its portfolio transactions. Transaction numbers and CCIDs are assigned when the file is created. PAM closes emptied contracts itself.</p>`;
+      <p class="small muted">Load order: each step's global action, then its portfolio transactions. PAM assigns transaction numbers on load; CCIDs are assigned when the file is created. PAM closes emptied contracts itself.</p>`;
   }
 
   function actionsFor(ev) {
@@ -852,7 +850,6 @@
             <div><dt>Data in use</dt><dd>${esc(state.sourceLabel)}</dd></div>
             <div><dt>Run date</dt><dd class="mono">${esc(state.asOfDate)}</dd></div>
             <div><dt>Compared with</dt><dd class="mono">${esc(state.priorAsOfDate)}</dd></div>
-            <div><dt>Next PAM transaction number</dt><dd><input type="text" id="next-txn" inputmode="numeric" value="${esc(state.nextTxn)}" aria-label="Next PAM transaction number" style="width:12ch"></dd></div>
           </dl>
           <div class="row">
             <button class="btn primary" data-action="rerun">Run detection</button>
@@ -988,7 +985,7 @@
       case 'copyMessages': {
         const ev = itemByKey(state.selectedKey);
         if (ev && ev.kind === 'fee') copyText(E.toCSV(ev.messages, E.LAYOUTS.pamFeeImport.slice(2)), `${ev.messages.length} messages`);
-        else if (ev) copyText(fileMsgs(ev).map(m => E.pamMessageText(m, { txnNumber: 'TBD', ccid: 'TBD' })).join('\n\n'), `${fileMsgs(ev).length} messages`);
+        else if (ev) copyText(fileMsgs(ev).map(m => E.pamMessageText(m, { ccid: 'TBD' })).join('\n\n'), `${fileMsgs(ev).length} messages`);
         return;
       }
       case 'copyBatch': {
@@ -1035,10 +1032,6 @@
 
   document.addEventListener('input', e => {
     if (e.target.id === 'user-name') { state.user = e.target.value; save(); }
-    if (e.target.id === 'next-txn') {
-      const n = Number(e.target.value.trim());
-      if (Number.isInteger(n) && n > 0) { state.nextTxn = n; save(); }
-    }
     if (e.target.id === 'queue-search') {
       state.search = e.target.value;
       document.getElementById('queue-table').innerHTML = queueTable();

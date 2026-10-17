@@ -109,12 +109,12 @@ test('global action carries signed global units; portfolio paydowns are manual f
 
 test('PAM file text follows PAM syntax and numbers transactions', () => {
   const events = detectSample();
-  const file = E.buildPamFile([byAsset(events, 'A1008')], { batchId: 'B1', startTxn: 9000001 });
+  const file = E.buildPamFile([byAsset(events, 'A1008')], { batchId: 'B1' });
   assert.match(file.text, /^BANKLOANACTION\(\nAdd,\n,\nSecID\(3,PT-1008\),\n20261030,\n9,\n,\nBANKLOANACTIONCONTRACTALLOC\(/);
-  assert.match(file.text, /TaCONTRACTCOMBINE\(\nADD,\n9000001,\nSecID\(3,PT-1008\),\nCONTRACTSECID\(26,418216\),\n20261030,\n20261030,\nFUND-I,\nBNK\(BNK1,FUND-I Custody,\d+,CASHBANK\(CSH\)\),\n\d+\.\d{6},\nCONTRACTALLOC\(\nADD,\nCONTRACTALLOCREC\(SecID\(26,PC-\d+\),\d+\.\d{6}\),/);
-  assert.equal(file.nextTxn, 9000004);
+  assert.match(file.text, /TaCONTRACTCOMBINE\(\nADD,\n,\nSecID\(3,PT-1008\),\nCONTRACTSECID\(26,418216\),\n20261030,\n20261030,\nFUND-I,\nBNK\(BNK1,FUND-I Custody,\d+,CASHBANK\(CSH\)\),\n\d+\.\d{6},\nCONTRACTALLOC\(\nADD,\nCONTRACTALLOCREC\(SecID\(26,PC-\d+\),\d+\.\d{6}\),/);
+  assert.ok(!/ADD,\n\d/.test(file.text), 'no transaction numbers: PAM assigns them');
   assert.equal(file.before.length, 1);
-  const split = E.buildPamFile([byAsset(events, 'A1007')], { batchId: 'B2', startTxn: 1 }).text;
+  const split = E.buildPamFile([byAsset(events, 'A1007')], { batchId: 'B2' }).text;
   assert.match(split, /SETMTHD\(11\),\nTRDR\(\nM,\n\d{8},\n100\.0000000,/);
 });
 
