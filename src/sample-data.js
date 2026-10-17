@@ -177,6 +177,7 @@
         AssetID: a.id, PAMTrancheID: `PT-${a.id.slice(1)}`, FacilityType: a.fac,
         // Fictional maturities spread over 2029-2032.
         MaturityDate: `${2029 + (i % 4)}-${String((i * 5) % 12 + 1).padStart(2, '0')}-15`,
+        PAMCurrency: '1',
       }));
   }
 

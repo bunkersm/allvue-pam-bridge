@@ -46,18 +46,18 @@ test('clean rollover is auto and sends nothing', () => {
   assert.equal(ev.lineageUpdates[0].pamContractId.startsWith('PC-'), true);
 });
 
-test('margin change at roll: create (manual), global split, then one split per PAM portfolio', () => {
+test('margin change at roll: create, global split, then one split per PAM portfolio', () => {
   const ev = byAsset(detectSample(), 'A1005');
   assert.equal(ev.type, 'CONTRACT_CHANGE');
   assert.equal(ev.route, 'review');
   assert.deepEqual(ev.rollTermChanges.map(d => d.field), ['marginBps']);
   assert.deepEqual(ev.messages.map(m => `${m.step}:${m.level}:${m.type}${m.manual ? ':manual' : ''}`), [
-    '1:SMF:CONTRACT_CREATE:manual', '2:GLOBAL:CONTRACT_SPLIT',
+    '1:SMF:CONTRACT_CREATE', '2:GLOBAL:CONTRACT_SPLIT',
     '2:PORTFOLIO:CONTRACT_SPLIT', '2:PORTFOLIO:CONTRACT_SPLIT', '2:PORTFOLIO:CONTRACT_SPLIT',
   ]);
   const newId = ev.added[0].contractId;
   assert.equal(ev.messages[0].contractId, newId, 'new PAM contract takes the AllVue contract ID');
-  assert.equal(ev.messages[0].contract.marginBps, 350);
+  assert.equal(ev.messages[0].inputs[0].spread_bps, 350);
   const global = ev.messages[1];
   assert.equal(global.actionType, 8);
   assert.equal(global.allocs.reduce((s, a) => s + a.units, 0), 0, 'global split nets to zero');
@@ -82,7 +82,9 @@ test('split ties by new contract and by portfolio', () => {
     assert.equal(m.allocs.reduce((s, a) => s + a.units, 0), m.unitsExchanged);
     assert.equal(m.allocs.length, 2);
   }
-  assert.equal(ev.messages.filter(m => m.level === 'SMF').length, 2);
+  const create = ev.messages.filter(m => m.level === 'SMF');
+  assert.equal(create.length, 1, 'one tranche update');
+  assert.equal(create[0].inputs.length, 2, 'carrying both new contracts');
   assert.equal(ev.messages.filter(m => m.level === 'GLOBAL').length, 1);
 });
 
@@ -110,10 +112,11 @@ test('global action carries signed global units; portfolio paydowns are manual f
 test('PAM file text follows PAM syntax and numbers transactions', () => {
   const events = detectSample();
   const file = E.buildPamFile([byAsset(events, 'A1008')], { batchId: 'B1' });
-  assert.match(file.text, /^BANKLOANACTION\(\nAdd,\n,\nSecID\(3,PT-1008\),\n20261030,\n9,\n,\nBANKLOANACTIONCONTRACTALLOC\(/);
+  assert.match(file.text, /\n\nBANKLOANACTION\(\nAdd,\n,\nSecID\(3,PT-1008\),\n20261030,\n9,\n,\nBANKLOANACTIONCONTRACTALLOC\(/);
   assert.match(file.text, /TaCONTRACTCOMBINE\(\nADD,\n,\nSecID\(3,PT-1008\),\nCONTRACTSECID\(26,418216\),\n20261030,\n20261030,\nFUND-I,\nBNK\(BNK1,FUND-I Custody,\d+,CASHBANK\(CSH\)\),\n\d+\.\d{6},\nCONTRACTALLOC\(\nADD,\nCONTRACTALLOCREC\(SecID\(26,PC-\d+\),\d+\.\d{6}\),/);
   assert.ok(!/ADD,\n\d/.test(file.text), 'no transaction numbers: PAM assigns them');
-  assert.equal(file.before.length, 1);
+  assert.equal(file.before.length, 0);
+  assert.match(file.text, /^SMFBANKLOANTRANCHE\(UPDATE,SecID\(3,PT-1008\),,2,\d{8},1,SMFBANKLOANCONTRACT\(REPLACE,SMFBANKLOANCONTRACTREC\(REPLACE,SecID\(26,418216\), ,B,/);
   const split = E.buildPamFile([byAsset(events, 'A1007')], { batchId: 'B2' }).text;
   assert.match(split, /SETMTHD\(11\),\nTRDR\(\nM,\n\d{8},\n100\.0000000,/);
 });
@@ -249,4 +252,93 @@ test('fee checks route mismatches, corrections, duplicates, term loans and unmap
 test('fee keys are unique even with duplicate rows', () => {
   const keys = checkSampleFees().map(f => f.key);
   assert.equal(new Set(keys).size, keys.length);
+});
+
+// ---------------------------------------------------------------- contract add (build spec)
+
+const GOLDEN = 'SMFBANKLOANTRANCHE(UPDATE,SecID(3,DUMMYSEC001),,2,20310107,1,SMFBANKLOANCONTRACT(REPLACE,SMFBANKLOANCONTRACTREC(REPLACE,SecID(26,CNTR0005), ,B,20310107,,COUPONDATA(V,,C,Q,D,19,30,T,,,0,HOLIDAYS(US,3),FLOATDATA(SR3M,A,Q,19,30,COMPOUNDFACTORS(500.000000,1.000000),0.000000,1.000000,0,0,LOCKOUTINFORMATION(0,2),RESETDATECONV(3),RESETHOLIDAYSCHEDULE(US))),ISSUENAME(01/25 Revolver))))';
+const goldenInput = () => ({
+  ...E.PAM_CONTRACT_DEFAULTS,
+  tranche_id: 'DUMMYSEC001', loan_type: 2, tranche_maturity: '20310107', currency: '1',
+  contract_id: 'CNTR0005', contract_maturity: '20310107',
+  coupon_type: 'V', coupon_rate: '', coupon_freq: 'Q', accrual_month: 19, accrual_day: 30,
+  base_index: 'SR3M', reset_freq: 'Q', reset_month: 19, reset_day: 30, spread_bps: 500, min_rate: 1,
+  issue_name: '01/25 Revolver',
+});
+const errorsFor = change => { const i = goldenInput(); change(i); return E.validateContractAdd(i).errors; };
+
+test('contract add: golden string matches the build spec exactly', () => {
+  assert.deepEqual(E.validateContractAdd(goldenInput()), { errors: [], warnings: [] });
+  assert.equal(E.contractAddMessage([goldenInput()]), GOLDEN);
+});
+
+test('contract add: fixed rate has a coupon rate and no FLOATDATA', () => {
+  const i = { ...goldenInput(), coupon_type: 'F', coupon_rate: 7.25 };
+  assert.deepEqual(E.validateContractAdd(i).errors, []);
+  const text = E.contractAddMessage([i]);
+  assert.match(text, /COUPONDATA\(F,7\.250000,C,Q,/);
+  assert.ok(!text.includes('FLOATDATA'));
+});
+
+test('contract add: excluded fields never appear', () => {
+  const events = detectSample();
+  const texts = [E.contractAddMessage([goldenInput()]),
+    ...events.flatMap(ev => ev.messages.filter(m => m.level === 'SMF').map(m => E.pamMessageText(m)))];
+  for (const t of texts) for (const f of E.EXCLUDED_CONTRACT_FIELDS) assert.ok(!t.toUpperCase().includes(`${f}(`) && !t.toUpperCase().includes(`,${f},`), f);
+  assert.ok(texts.every(t => !t.includes('CCID')), 'CCID is off by default');
+  assert.match(E.contractAddMessage([goldenInput()], { ccid: { user: 'USER', date: '20261017' } }), /,CCID\(USER,20261017,0\)\)$/);
+});
+
+test('contract add: each validation rule rejects bad input', () => {
+  // 1 required fields
+  for (const k of ['tranche_id', 'contract_id', 'tranche_maturity', 'contract_maturity', 'currency', 'coupon_type', 'coupon_freq', 'dated_type']) {
+    assert.ok(errorsFor(i => { i[k] = ''; }).some(e => e.includes(k)), k);
+  }
+  // 2 dates
+  assert.ok(errorsFor(i => { i.tranche_maturity = '20311399'; }).some(e => /valid YYYYMMDD/.test(e)));
+  // 3 contract maturity after tranche maturity
+  assert.ok(errorsFor(i => { i.contract_maturity = '20320101'; }).some(e => /after tranche_maturity/.test(e)));
+  // 4 loan type
+  assert.ok(errorsFor(i => { i.loan_type = 4; }).some(e => /loan_type/.test(e)));
+  // 5 payment type, numeric codes convert with a warning
+  assert.ok(errorsFor(i => { i.payment_type = 'X'; }).some(e => /payment_type/.test(e)));
+  const coded = { ...goldenInput(), payment_type: '66' };
+  const v5 = E.validateContractAdd(coded);
+  assert.deepEqual(v5.errors, []);
+  assert.equal(v5.warnings.length, 1);
+  assert.equal(coded.payment_type, 'B');
+  // 6 floating: no coupon rate, all float fields
+  assert.ok(errorsFor(i => { i.coupon_rate = 5; }).some(e => /coupon_rate must be blank/.test(e)));
+  assert.ok(errorsFor(i => { i.base_index = ''; }).some(e => /base_index/.test(e)));
+  // 7 fixed: coupon rate required, >= 0
+  assert.ok(errorsFor(i => { i.coupon_type = 'F'; i.coupon_rate = ''; }).some(e => /coupon_rate is required/.test(e)));
+  assert.ok(errorsFor(i => { i.coupon_type = 'F'; i.coupon_rate = -1; }).some(e => /coupon_rate is required/.test(e)));
+  // 8 accrual day
+  assert.ok(errorsFor(i => { i.coupon_freq = 'B'; i.accrual_month = ''; }).some(e => /accrual_day must be blank/.test(e)));
+  assert.ok(errorsFor(i => { i.accrual_day = 32; }).some(e => /1-31/.test(e)));
+  // 9 accrual month vs frequency
+  assert.ok(errorsFor(i => { i.accrual_month = 13; }).some(e => /19, 20 or 21/.test(e)));
+  assert.ok(errorsFor(i => { i.coupon_freq = 'S'; i.accrual_month = 19; }).some(e => /13-18/.test(e)));
+  assert.ok(errorsFor(i => { i.coupon_freq = 'A'; i.accrual_month = 13; }).some(e => /1-12/.test(e)));
+  // 10 dated date blank for T or space
+  assert.ok(errorsFor(i => { i.dated_date = '20261017'; }).some(e => /dated_date/.test(e)));
+  // 11 non-negative
+  for (const k of ['delay', 'spread_bps', 'min_rate', 'max_rate']) assert.ok(errorsFor(i => { i[k] = -1; }).some(e => e.includes(k)), k);
+  // 12 duplicate contract IDs in one file
+  const ev = byAsset(detectSample(), 'A1005');
+  assert.equal(E.buildPamFile([ev, { ...ev, key: 'copy' }], { batchId: 'B' }).errors.length, 1);
+  // 13 balanced parentheses
+  assert.throws(() => E.assertBalanced('A(B(C)'));
+  assert.throws(() => E.assertBalanced('A(B))('));
+});
+
+test('contract add from AllVue data maps codes and blocks bad input as an exception', () => {
+  const ev = byAsset(detectSample(), 'A1006', 'LOANS-MASTER'); // 1M -> 3M tenor change
+  const input = ev.messages.find(m => m.level === 'SMF').inputs[0];
+  assert.equal(input.loan_type, 1);
+  assert.equal(input.coupon_freq, 'Q');
+  assert.equal(input.accrual_month, 19);
+  assert.equal(input.base_index, 'SR3M');
+  const bad = detectSample(d => { d.trancheMap.find(r => r.AssetID === 'A1006').MaturityDate = ''; });
+  assert.equal(byAsset(bad, 'A1006').route, 'exception');
 });

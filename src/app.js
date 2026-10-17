@@ -6,7 +6,7 @@
   'use strict';
   const E = window.Engine;
   const S = window.SampleData;
-  const STORE_KEY = 'loan-event-bridge:v4';
+  const STORE_KEY = 'loan-event-bridge:v5';
 
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const money = E.formatMoney;
@@ -53,7 +53,7 @@
     { key: 'prior', title: 'AllVue contracts, prior day', layout: 'allvue', desc: 'Contract-level export from the previous business day. Detection compares it with the current day.' },
     { key: 'current', title: 'AllVue contracts, current day', layout: 'allvue', desc: 'Same export for the day you are processing. Its AsOfDate becomes the run date.' },
     { key: 'portfolioMap', title: 'Portfolio map', layout: 'portfolioMap', desc: 'One row per PAM portfolio fed by an AllVue portfolio, with the bank and custody details used in its PAM messages.' },
-    { key: 'trancheMap', title: 'Tranche map', layout: 'trancheMap', desc: 'Links each AllVue asset to its PAM facility security ID, with the maturity date used in contract splits.' },
+    { key: 'trancheMap', title: 'Tranche map', layout: 'trancheMap', desc: 'Links each AllVue asset to its PAM facility security ID, with the maturity date and PAM currency code used in contract creates and splits.' },
     { key: 'pamPositions', title: 'PAM positions', layout: 'pamPositions', desc: 'Funded and unfunded position per PAM portfolio and tranche. Used for tie-out and allocation.' },
     { key: 'lineage', title: 'Contract lineage', layout: 'lineage', desc: 'Which PAM contract each live AllVue contract represents.' },
     { key: 'fees', title: 'AllVue unfunded fee export', layout: 'fees', desc: 'Monthly commitment and ticking fees. PeriodEnd is the last accrual day.' },
@@ -306,6 +306,7 @@
     if (isFee) rows = E.buildBatchRows(items, id);
     else {
       file = E.buildPamFile(items, { batchId: id });
+      if (file.errors.length) { toast(`File not created: ${file.errors.join(' ')}`); return; }
     }
     const count = isFee ? rows.length : file.messageCount;
     const fileName = isFee ? `PAM_FEES_${id}.csv` : `PAM_IMPORT_${id}.txt`;
@@ -555,11 +556,11 @@
     const after = ev.messages.filter(m => m.manual && m.level !== 'SMF');
     const blocks = fileMsgs(ev).map(m => `<div class="stack">
         <div class="small"><b>Step ${m.step}</b> · ${levelLabel[m.level]}${typeLabel[m.type] ? `, ${typeLabel[m.type]}` : ''}${m.pamPortfolio ? ` · <span class="mono">${esc(m.pamPortfolio)}</span>` : ''}${m.level === 'GLOBAL' ? ` · type ${m.actionType}` : ''}</div>
-        <pre class="file">${esc(E.pamMessageText(m, { ccid: 'TBD' }))}</pre></div>`).join('');
+        <pre class="file">${esc(E.pamMessageText(m, { ccid: 'TBD', pretty: m.level === 'SMF' }))}</pre></div>`).join('');
     return `${checklist('Before loading: create these contracts in PAM', before.map(m => ({ text: E.manualStepText(m) })))}
       ${blocks || '<p class="muted">No messages go in the PAM file for this event.</p>'}
       ${checklist('After loading: book these in PAM', after.map(m => ({ text: E.manualStepText(m) })))}
-      <p class="small muted">Load order: each step's global action, then its portfolio transactions. PAM assigns transaction numbers on load; CCIDs are assigned when the file is created. PAM closes emptied contracts itself.</p>`;
+      <p class="small muted">Load order: the contract create (shown indented here, one line in the file), then each step's global action and its portfolio transactions. PAM assigns transaction numbers on load; CCIDs are assigned when the file is created. PAM closes emptied contracts itself.</p>`;
   }
 
   function actionsFor(ev) {
@@ -870,7 +871,7 @@
             <li>1 → many is a <b>split</b>, many → 1 is a <b>combine</b>, many → many is a <b>complex restructure</b>. New contracts with nothing expiring are a <b>draw</b>.</li>
             <li>A lower funded total is a <b>paydown</b>; a higher one is a <b>draw</b>, or <b>capitalized interest</b> when the contract's interest type is Capitalize or Partial. These are booked after any split or combine.</li>
             <li>PAM message order for each event: <b>create</b> new contracts (security master), then for each step one <b>BANKLOANACTION</b> global action with signed global units per contract, then one <b>TaCONTRACTSPLIT</b> or <b>TaCONTRACTCOMBINE</b> per PAM portfolio. A terms change is a new contract plus a 1:1 split; many → many is a combine then a split. New contracts take the AllVue contract ID.</li>
-            <li>Contract creates and portfolio paydown, draw and capitalization messages are listed as manual steps until their PAM formats are added.</li>
+            <li>New contracts are created with one <b>SMFBANKLOANTRANCHE</b> UPDATE per event (minimal contract add), validated before it goes in the file. Portfolio paydown, draw and capitalization messages are listed as manual steps until their PAM formats are added.</li>
             <li>If your position changes but the global amount does not, it is treated as a <b>trade</b>, not a paydown or draw. A change that isn't your share of the global change goes to review.</li>
             <li>A rollover is <b>clean</b> and needs no PAM message when amount and terms match and the new period is regular (${esc(tenors)}).</li>
             <li><b>Exceptions</b>: asset or portfolio not mapped, PAM positions not tying to AllVue before the event, funded plus unfunded not equal to commitment, term loan draws, draws larger than unfunded, missing PAM contract lineage.</li>

@@ -42,7 +42,7 @@
     allvue: ['AsOfDate', 'AllVuePortfolio', 'AssetID', 'AssetName', 'FacilityType', 'ContractID', 'ContractType',
       'StartDate', 'EndDate', 'Amount', 'GlobalAmount', 'Commitment', 'RateType', 'InterestType', 'BaseRate', 'Tenor', 'MarginBps', 'FloorPct',
       'PayFreq', 'ResetFreq', 'DayCount'],
-    trancheMap: ['AssetID', 'PAMTrancheID', 'FacilityType', 'MaturityDate'],
+    trancheMap: ['AssetID', 'PAMTrancheID', 'FacilityType', 'MaturityDate', 'PAMCurrency'],
     portfolioMap: ['AllVuePortfolio', 'PAMPortfolio', 'Bank', 'CustodyAccount', 'CashAccount', 'CashBank'],
     pamPositions: ['PAMPortfolio', 'PAMTrancheID', 'Funded', 'Unfunded'],
     lineage: ['AllVueContractID', 'PAMContractID'],
@@ -193,6 +193,7 @@
           pamTrancheId: r.PAMTrancheID.trim(),
           facilityType: (r.FacilityType || '').trim().toUpperCase(),
           maturityDate: normalizeDate(r.MaturityDate),
+          currency: (r.PAMCurrency || '').trim(),
         };
       }
     });
@@ -502,9 +503,11 @@
       const noBank = weights.map(w => w.key).filter(p => !(ctx.accounts[p] && ctx.accounts[p].bank && ctx.accounts[p].custodyAccount));
       if (noBank.length) exception(`No bank or custody account for ${noBank.join(', ')} in the portfolio map. PAM's portfolio messages need them.`);
     }
-    if (messages.some(m => m.manual && m.level === 'SMF')) {
-      info(`Create ${messages.filter(m => m.level === 'SMF').map(m => m.contractId).join(', ')} in PAM before loading the file. The contract create message format hasn't been added yet.`);
-    }
+    messages.filter(m => m.level === 'SMF').forEach(m => m.inputs.forEach(input => {
+      const v = validateContractAdd(input);
+      v.errors.forEach(e => exception(`Contract create for ${input.contract_id}: ${e}`));
+      v.warnings.forEach(w => info(`Contract create for ${input.contract_id}: ${w}`));
+    }));
     if (messages.some(m => m.manual && m.level === 'PORTFOLIO')) {
       info('Book the portfolio paydown, draw or capitalization transactions in PAM after loading the file. Their message format hasn\'t been added yet.');
     }
@@ -676,7 +679,13 @@
     const common = { facilityId: tranche.pamTrancheId, effectiveDate, maturityDate: tranche.maturityDate };
     if (plan.creates.length) {
       stepNo++;
-      plan.creates.forEach(c => out.push({ ...common, step: stepNo, level: 'SMF', type: 'CONTRACT_CREATE', manual: true, contractId: c.pamContractId, contract: c }));
+      // One SMFBANKLOANTRANCHE UPDATE per event carrying every new contract on the tranche.
+      out.push({
+        ...common, step: stepNo, level: 'SMF', type: 'CONTRACT_CREATE',
+        contractId: plan.creates.map(c => c.pamContractId).join(', '),
+        contractIds: plan.creates.map(c => c.pamContractId),
+        inputs: plan.creates.map(c => contractAddInput(c, tranche)),
+      });
     }
     plan.steps.forEach(step => {
       stepNo++;
@@ -718,10 +727,185 @@
   }
 
   const pamDate = d => String(d || '').replace(/-/g, '');
+
+  // ---------------------------------------------------------------- PAM contract add (SMFBANKLOANTRANCHE)
+  //
+  // Minimal message that adds new funded contracts to an existing tranche, per
+  // the PAM bank loan contract add build spec. Built as a tree of messages and
+  // serialized recursively, never by string templating.
+
+  /** A PAM message node: KEYWORD(arg, arg, ...). Args are strings, numbers, null (blank) or nodes. */
+  const node = (keyword, ...args) => ({ keyword, args });
+
+  function serialize(n) {
+    if (n === null || n === undefined) return '';
+    if (typeof n === 'object') return `${n.keyword}(${n.args.map(serialize).join(',')})`;
+    return String(n);
+  }
+
+  /** Indented version for human review. */
+  function prettyPrint(n, depth = 0) {
+    const pad = '  '.repeat(depth);
+    if (n === null || n === undefined || typeof n !== 'object') return pad + (n === ' ' ? "' '" : serialize(n));
+    if (!n.args.some(a => a && typeof a === 'object')) return pad + serialize(n);
+    return `${pad}${n.keyword}(\n${n.args.map(a => prettyPrint(a, depth + 1)).join(',\n')}\n${pad})`;
+  }
+
+  function assertBalanced(text) {
+    let depth = 0;
+    for (const ch of text) {
+      if (ch === '(') depth++;
+      if (ch === ')' && --depth < 0) break;
+    }
+    if (depth !== 0) throw new Error('Unbalanced parentheses in PAM message');
+    return text;
+  }
+
+  // Values PAM needs that AllVue doesn't carry. From the build spec's sample defaults.
+  const PAM_CONTRACT_DEFAULTS = {
+    strip: ' ', payment_type: 'B', coupon_form: 'C', day_count: 'D', dated_type: 'T', delay: 0,
+    holiday_schedule: 'US', pay_date_conv: 3, float_method: 'A', multiplier: 1, max_rate: 0,
+    lockout_days: 0, lookback_days: 2, reset_date_conv: 3, reset_holiday_schedule: 'US',
+  };
+  const LOAN_TYPE_CODE = { TL: 1, RC: 2, DDTL: 3 };
+  const FREQ_CODE = { MONTHLY: 'M', QUARTERLY: 'Q', 'SEMI-ANNUAL': 'S', SEMIANNUAL: 'S', 'SEMI ANNUAL': 'S', ANNUAL: 'A', 'AT MATURITY': 'B' };
+  const DAY_COUNT_CODE = { 'ACT/360': 'D', 'ACT/365': 'C', '30/360': 'A' };
+  const COUPON_FORM_CODE = { CASH: 'C', CAPITALIZE: 'P', CAPITALIZED: 'P', PIK: 'P', PARTIAL: 'P', 'PARTIAL PIK': 'P' };
+  const BASE_INDEX_PREFIX = { SOFR: 'SR' };
+  const EXCLUDED_CONTRACT_FIELDS = ['ACCTDATA', 'OPERDATA', 'CALLDATA', 'CONTRACTSIZE', 'ISSUESYMBOL', 'OIDDATE', 'OIDPRICE',
+    'SINKFUNDDATA', 'MANDCONV', 'ACCRUALLAG', 'BORROWERID', 'OPTIONTODEFER', 'NONADMITTEDINCOMEIND', 'UNCOLLECTABLEINCOMEIND',
+    'BALLOONPAYMENTPERCENTATORIGINATION', 'OPTIONALNONCASHINCOMEIND', 'SERBNDTREATMENT', 'PIKDATA', 'ACCRUALDATA', 'SCHDINTDATA',
+    'PIKFIXEDRATEDATA', 'VARACCRUALDATA', 'COMPOUNDFREQ', 'COMPOUNDMETHOD', 'COMPOUNDMONTH', 'COMPOUNDDAY', 'INTERPOLATEINITIALRATE',
+    'VRROUNDING', 'ALTRATECALCMETHOD', 'DAYLAGWEIGHTMETHOD', 'ADJUSTACCRUALFORMATURITY'];
+
+  /** Accrual month code: Q → 19 (J-A-J-O), 20 (F-M-A-N), 21 (M-J-S-D); S → 13-18; A → 1-12. */
+  function accrualMonthCode(freq, month) {
+    if (freq === 'Q') return 19 + ((month - 1) % 3);
+    if (freq === 'S') return 13 + ((month - 1) % 6);
+    if (freq === 'A') return month;
+    return null;
+  }
+
+  /** Maps an AllVue contract on a mapped tranche to the build spec's input keys. */
+  function contractAddInput(c, tranche) {
+    const coupon_type = c.rateType.toUpperCase() === 'FIXED' ? 'F' : c.rateType.toUpperCase() === 'FLOATING' ? 'V' : c.rateType;
+    const coupon_freq = FREQ_CODE[c.payFreq.toUpperCase()] || c.payFreq;
+    const reset_freq = FREQ_CODE[c.resetFreq.toUpperCase()] || c.resetFreq;
+    // The pay date is the contract end date; business-day rolls can pull it a day or two early,
+    // so take the later of the start and end day of month as the scheduled pay day.
+    const payMonth = Number(c.endDate.slice(5, 7));
+    const payDay = Math.max(Number(c.startDate.slice(8, 10)), Number(c.endDate.slice(8, 10)));
+    const noDay = coupon_freq === 'B' || coupon_freq === 'T';
+    const prefix = BASE_INDEX_PREFIX[c.baseRate.toUpperCase()];
+    return {
+      ...PAM_CONTRACT_DEFAULTS,
+      tranche_id: tranche.pamTrancheId,
+      loan_type: LOAN_TYPE_CODE[c.facilityType] ?? '',
+      tranche_maturity: pamDate(tranche.maturityDate),
+      currency: tranche.currency,
+      contract_id: c.pamContractId,
+      contract_maturity: pamDate(tranche.maturityDate),
+      coupon_type,
+      coupon_rate: coupon_type === 'F' ? c.marginBps / 100 : '',
+      coupon_form: COUPON_FORM_CODE[c.interestType.toUpperCase()] || PAM_CONTRACT_DEFAULTS.coupon_form,
+      coupon_freq,
+      day_count: DAY_COUNT_CODE[c.dayCount.toUpperCase()] || c.dayCount,
+      accrual_month: accrualMonthCode(coupon_freq, payMonth) ?? '',
+      accrual_day: noDay ? '' : payDay,
+      base_index: coupon_type === 'V' ? (prefix ? `${prefix}${c.tenor}` : '') : '',
+      reset_freq: coupon_type === 'V' ? reset_freq : '',
+      reset_month: coupon_type === 'V' ? (accrualMonthCode(reset_freq, payMonth) ?? '') : '',
+      reset_day: coupon_type === 'V' && !noDay ? payDay : '',
+      spread_bps: coupon_type === 'V' ? c.marginBps : '',
+      min_rate: coupon_type === 'V' ? c.floorPct : '',
+      interest_type: c.interestType,
+      base_rate: c.baseRate,
+    };
+  }
+
+  const blank = v => v === undefined || v === null || String(v) === '';
+  const isDate = v => /^\d{8}$/.test(String(v)) && !Number.isNaN(Date.parse(`${String(v).slice(0, 4)}-${String(v).slice(4, 6)}-${String(v).slice(6, 8)}T00:00:00Z`))
+    && new Date(`${String(v).slice(0, 4)}-${String(v).slice(4, 6)}-${String(v).slice(6, 8)}T00:00:00Z`).toISOString().slice(0, 10).replace(/-/g, '') === String(v);
+
+  /** The build spec's validation rules (section 5). Returns errors (block the message) and warnings. */
+  function validateContractAdd(input) {
+    const errors = [];
+    const warnings = [];
+    const i = { ...input };
+    ['tranche_id', 'contract_id', 'tranche_maturity', 'contract_maturity', 'currency', 'coupon_type', 'coupon_freq', 'dated_type']
+      .forEach(k => { if (blank(i[k]) && !(k === 'dated_type' && i[k] === ' ')) errors.push(`${k} is required.`); });
+    ['tranche_maturity', 'contract_maturity'].forEach(k => { if (!blank(i[k]) && !isDate(i[k])) errors.push(`${k} "${i[k]}" is not a valid YYYYMMDD date.`); });
+    if (isDate(i.tranche_maturity) && isDate(i.contract_maturity) && Number(i.contract_maturity) > Number(i.tranche_maturity)) errors.push('contract_maturity is after tranche_maturity.');
+    if (![1, 2, 3].includes(Number(i.loan_type)) || blank(i.loan_type)) errors.push(`loan_type "${i.loan_type}" must be 1, 2 or 3.`);
+    if (String(i.payment_type) === '66' || String(i.payment_type) === '83') {
+      warnings.push(`payment_type ${i.payment_type} converted to ${String(i.payment_type) === '66' ? 'B' : 'S'}.`);
+      input.payment_type = String(i.payment_type) === '66' ? 'B' : 'S';
+    } else if (!['B', 'S'].includes(i.payment_type)) errors.push(`payment_type "${i.payment_type}" must be B or S.`);
+    if (i.coupon_type === 'V') {
+      if (!blank(i.coupon_rate)) errors.push('coupon_rate must be blank for a floating contract.');
+      ['base_index', 'float_method', 'reset_freq', 'spread_bps', 'multiplier', 'max_rate', 'min_rate', 'lockout_days', 'lookback_days', 'reset_date_conv', 'reset_holiday_schedule']
+        .forEach(k => { if (blank(i[k])) errors.push(k === 'base_index' && !blank(i.base_rate) ? `No PAM base index for base rate "${i.base_rate}".` : `${k} is required for a floating contract.`); });
+    } else if (i.coupon_type === 'F') {
+      if (blank(i.coupon_rate) || Number(i.coupon_rate) < 0) errors.push('coupon_rate is required and must be 0 or more for a fixed contract.');
+    } else if (!blank(i.coupon_type)) errors.push(`coupon_type "${i.coupon_type}" must be V or F.`);
+    if (['B', 'T'].includes(i.coupon_freq)) {
+      if (!blank(i.accrual_day)) errors.push('accrual_day must be blank when coupon_freq is B or T.');
+    } else if (!blank(i.coupon_freq) && (blank(i.accrual_day) || !(Number(i.accrual_day) >= 1 && Number(i.accrual_day) <= 31))) {
+      errors.push(`accrual_day "${i.accrual_day}" must be 1-31.`);
+    }
+    const m = Number(i.accrual_month);
+    if (i.coupon_freq === 'Q' && ![19, 20, 21].includes(m)) errors.push(`accrual_month "${i.accrual_month}" must be 19, 20 or 21 for quarterly.`);
+    if (i.coupon_freq === 'S' && !(m >= 13 && m <= 18)) errors.push(`accrual_month "${i.accrual_month}" must be 13-18 for semi-annual.`);
+    if (i.coupon_freq === 'A' && !(m >= 1 && m <= 12)) errors.push(`accrual_month "${i.accrual_month}" must be 1-12 for annual.`);
+    if (!['T', ' ', 'N'].includes(i.dated_type) && !blank(i.dated_type)) errors.push(`dated_type "${i.dated_type}" must be T, N or a space.`);
+    if (['T', ' '].includes(i.dated_type) && !blank(i.dated_date)) errors.push('dated_date must be blank when dated_type is T or blank.');
+    ['delay', 'spread_bps', 'min_rate', 'max_rate'].forEach(k => { if (!blank(i[k]) && Number(i[k]) < 0) errors.push(`${k} must not be negative.`); });
+    if (String(i.interest_type || '').toUpperCase().startsWith('PARTIAL')) warnings.push('Partial PIK is sent as coupon form P; the PIK split is not part of the minimal message.');
+    return { errors, warnings };
+  }
+
+  const dec6 = v => Number(v).toFixed(6);
+
+  function contractRecNode(i) {
+    const floating = i.coupon_type === 'V';
+    const coupon = node('COUPONDATA',
+      i.coupon_type, floating ? null : dec6(i.coupon_rate), i.coupon_form, i.coupon_freq, i.day_count,
+      blank(i.accrual_month) ? null : i.accrual_month, blank(i.accrual_day) ? null : i.accrual_day,
+      i.dated_type, null, null, i.delay,
+      node('HOLIDAYS', i.holiday_schedule, i.pay_date_conv),
+      ...(floating ? [node('FLOATDATA',
+        i.base_index, i.float_method, i.reset_freq, blank(i.reset_month) ? null : i.reset_month, blank(i.reset_day) ? null : i.reset_day,
+        node('COMPOUNDFACTORS', dec6(i.spread_bps), dec6(i.multiplier)),
+        dec6(i.max_rate), dec6(i.min_rate), 0, 0,
+        node('LOCKOUTINFORMATION', i.lockout_days, i.lookback_days),
+        node('RESETDATECONV', i.reset_date_conv),
+        node('RESETHOLIDAYSCHEDULE', i.reset_holiday_schedule))] : []));
+    return node('SMFBANKLOANCONTRACTREC', 'REPLACE', node('SecID', PAM.contractIdType, i.contract_id),
+      i.strip, i.payment_type, i.contract_maturity, null, coupon,
+      ...(blank(i.issue_name) ? [] : [node('ISSUENAME', i.issue_name)]));
+  }
+
+  /**
+   * SMFBANKLOANTRANCHE UPDATE adding one or more contracts to one tranche.
+   * Tranche fields come from the first input. ccid ({ user, date, time }) is optional and off by default.
+   */
+  function contractAddNode(inputs, { ccid } = {}) {
+    const t = inputs[0];
+    return node('SMFBANKLOANTRANCHE', 'UPDATE', node('SecID', PAM.facilityIdType, t.tranche_id), null,
+      t.loan_type, t.tranche_maturity, t.currency,
+      node('SMFBANKLOANCONTRACT', 'REPLACE', ...inputs.map(contractRecNode)),
+      ...(ccid ? [node('CCID', ccid.user, ccid.date, ccid.time ?? 0)] : []));
+  }
+
+  function contractAddMessage(inputs, opts) {
+    return assertBalanced(serialize(contractAddNode(inputs, opts)));
+  }
+
   const pamUnits = cents => `${fromCents(cents)}0000`;
 
   /** Writes one PAM message in PAM's import syntax. */
-  function pamMessageText(m, { ccid = '' } = {}) {
+  function pamMessageText(m, { ccid = '', pretty = false } = {}) {
+    if (m.level === 'SMF') return pretty ? prettyPrint(contractAddNode(m.inputs)) : contractAddMessage(m.inputs);
     const fac = `SecID(${PAM.facilityIdType},${m.facilityId})`;
     const cid = id => `(${PAM.contractIdType},${id})`;
     const ccidText = `CCID(${ccid},${pamDate(m.effectiveDate)},0)`;
@@ -776,6 +960,13 @@
    * CCID of batch-sequence.
    */
   function buildPamFile(events, { batchId }) {
+    const seen = new Map();
+    const errors = [];
+    events.forEach(ev => ev.messages.filter(m => m.level === 'SMF').forEach(m => m.contractIds.forEach(id => {
+      if (seen.has(id)) errors.push(`Contract ${id} is created by both ${seen.get(id)} and ${ev.key}.`);
+      else seen.set(id, ev.key);
+    })));
+    if (errors.length) return { text: '', messageCount: 0, before: [], after: [], errors };
     let seq = 0;
     const blocks = [];
     const before = [];
@@ -786,7 +977,7 @@
       const opts = m.level === 'PORTFOLIO' ? { ccid: `${batchId}-${String(seq).padStart(4, '0')}` } : {};
       blocks.push(pamMessageText(m, opts));
     }));
-    return { text: blocks.join('\n\n') + (blocks.length ? '\n' : ''), messageCount: blocks.length, before, after };
+    return { text: blocks.join('\n\n') + (blocks.length ? '\n' : ''), messageCount: blocks.length, before, after, errors };
   }
 
   // ---------------------------------------------------------------- unfunded fees
@@ -914,5 +1105,7 @@
     allocate, detectEvents, buildBatchRows,
     FEE_TOLERANCE, FEE_POSITION_DRIFT, normalizeFees, expectedFee, checkFees,
     PAM, normalizePortfolioAccounts, pamMessageText, manualStepText, buildPamFile,
+    node, serialize, prettyPrint, assertBalanced, PAM_CONTRACT_DEFAULTS, EXCLUDED_CONTRACT_FIELDS,
+    contractAddInput, validateContractAdd, contractAddNode, contractAddMessage,
   };
 });

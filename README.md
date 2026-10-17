@@ -60,7 +60,7 @@ Load these on **Setup and data** as CSV. Header names must match.
 |---|---|
 | AllVue contracts (prior and current day) | `AsOfDate, AllVuePortfolio, AssetID, AssetName, FacilityType, ContractID, ContractType, StartDate, EndDate, Amount, GlobalAmount, Commitment, RateType, InterestType, BaseRate, Tenor, MarginBps, FloorPct, PayFreq, ResetFreq, DayCount` |
 | Portfolio map | `AllVuePortfolio, PAMPortfolio, Bank, CustodyAccount, CashAccount, CashBank` |
-| Tranche map | `AssetID, PAMTrancheID, FacilityType, MaturityDate` |
+| Tranche map | `AssetID, PAMTrancheID, FacilityType, MaturityDate, PAMCurrency` |
 | PAM positions | `PAMPortfolio, PAMTrancheID, Funded, Unfunded` |
 | Contract lineage | `AllVueContractID, PAMContractID` |
 | AllVue unfunded fee export | `AllVuePortfolio, AssetID, AssetName, FacilityType, FeeType, PeriodStart, PeriodEnd, FeeRateBps, AverageUnfunded, DayCount, Amount, AllVueTransactionID` |
@@ -71,7 +71,7 @@ Load these on **Setup and data** as CSV. Header names must match.
 
 Contract events produce a PAM message file (`PAM_IMPORT_<batch>.txt`) in PAM's import syntax, in load order:
 
-1. **Create contract** (security master), one per new contract. New contracts take the AllVue contract ID. *The create message format hasn't been supplied yet, so these appear as a "before loading" checklist on the file.*
+1. **Create contract**: one `SMFBANKLOANTRANCHE(UPDATE, …)` per event, adding every new contract on the tranche as an `SMFBANKLOANCONTRACTREC`, following the PAM bank loan contract add build spec (minimal message, validated before it goes in the file; the spec's golden string is a test). New contracts take the AllVue contract ID.
 2. For each step (combine, split, then paydown, draw or capitalized interest):
    - one **`BANKLOANACTION`** global action, with signed global units per contract (sources negative, targets positive). Types: 8 contract split, 9 contract combine; 6 contract redemption, 4 drawdown and 10 interest capitalization are assumed for paydowns, draws and PIK and need confirming. The transaction generate job stays off.
    - one **`TaCONTRACTSPLIT`** per PAM portfolio (the source contract in `CONTRACTSECID`, targets in `CONTRACTALLOC`) or **`TaCONTRACTCOMBINE`** (the target in `CONTRACTSECID`, sources in `CONTRACTALLOC`), with `BNK()` from the portfolio map and a `CCID`. The transaction number is left blank; PAM assigns it on `ADD`. *Portfolio paydown, draw and capitalization formats haven't been supplied yet, so these appear as an "after loading" checklist.*
@@ -89,6 +89,29 @@ Contract events produce a PAM message file (`PAM_IMPORT_<batch>.txt`) in PAM's i
 PAM closes emptied contracts itself. The `TRDR()` block on splits (method `M`, the tranche maturity date, price 100) and `SETMTHD(11)` are copied from PAM's sample and should be confirmed. Security ID types are 3 for the facility (the PAM tranche ID) and 26 for contracts; see `PAM` in `src/engine.js`.
 
 Fee files use `BatchID, Seq, FeeKey, TransactionType, FeeType, PAMPortfolio, PAMTrancheID, PeriodStart, PeriodEnd, Amount, AllVueTransactionID` with transaction type `UNFUNDED_FEE`. Also a placeholder.
+
+### Contract create mapping
+
+| PAM field | From |
+|---|---|
+| Loan type | Facility type: TL 1, RC 2, DDTL 3 |
+| Tranche and contract maturity | Tranche map `MaturityDate` |
+| Currency | Tranche map `PAMCurrency` |
+| Coupon type | `RateType`: Floating V, Fixed F (fixed coupon = `MarginBps` / 100) |
+| Coupon form | `InterestType`: Cash C, Capitalize or Partial P |
+| Coupon and reset frequency | Pay and reset frequency: M, Q, S, A |
+| Day count | ACT/360 D, ACT/365 C, 30/360 A |
+| Accrual and reset month and day | The contract's pay date (end date, allowing for business-day rolls) |
+| Base index | SOFR + tenor: SR1M, SR3M |
+| Spread, minimum rate | Margin (bps), floor (%) |
+| Everything else | Spec defaults (`PAM_CONTRACT_DEFAULTS` in `src/engine.js`) |
+
+Open items from the spec, to confirm in a PAM test region before production:
+1. Whether `SMFBANKLOANCONTRACT(REPLACE, …)` with only the new contracts leaves existing contracts on the tranche intact, or replaces the whole list. **If it replaces the list, existing contracts would be removed**; the builder already supports several contract records per tranche so they can be re-sent.
+2. Whether loan type can be blank on UPDATE.
+3. Float method `A`, pay date convention `3` and reset date convention `3`.
+4. Whether PAM enforces CCID concurrency on tranche UPDATE (CCID is supported but off).
+5. What accrual month to send for monthly contracts (the spec defines it for Q, S and A only; monthly is sent blank).
 
 ## Files
 
