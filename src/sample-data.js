@@ -173,11 +173,19 @@
   function trancheMapRows() {
     const seen = new Set();
     return ASSETS.filter(a => !a.unmapped && !seen.has(a.id) && seen.add(a.id))
-      .map(a => ({ AssetID: a.id, PAMTrancheID: `PT-${a.id.slice(1)}`, FacilityType: a.fac }));
+      .map((a, i) => ({
+        AssetID: a.id, PAMTrancheID: `PT-${a.id.slice(1)}`, FacilityType: a.fac,
+        // Fictional maturities spread over 2029-2032.
+        MaturityDate: `${2029 + (i % 4)}-${String((i * 5) % 12 + 1).padStart(2, '0')}-15`,
+      }));
   }
 
   function portfolioMapRows() {
-    return Object.entries(PAM_PORTFOLIOS).flatMap(([av, pams]) => pams.map(p => ({ AllVuePortfolio: av, PAMPortfolio: p })));
+    let acct = 12345670;
+    return Object.entries(PAM_PORTFOLIOS).flatMap(([av, pams]) => pams.map(p => ({
+      AllVuePortfolio: av, PAMPortfolio: p,
+      Bank: 'BNK1', CustodyAccount: `${p} Custody`, CashAccount: String(++acct), CashBank: 'CSH',
+    })));
   }
 
   function pamPositionRows() {

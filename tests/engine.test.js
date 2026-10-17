@@ -12,6 +12,7 @@ function detectSample(mutate) {
     current: E.normalizeAllVue(d.current),
     trancheMap: E.normalizeTrancheMap(d.trancheMap),
     portfolioMap: E.normalizePortfolioMap(d.portfolioMap),
+    accounts: E.normalizePortfolioAccounts(d.portfolioMap),
     pamPositions: E.normalizePamPositions(d.pamPositions),
     lineage: E.normalizeLineage(d.lineage),
   });
@@ -45,21 +46,24 @@ test('clean rollover is auto and sends nothing', () => {
   assert.equal(ev.lineageUpdates[0].pamContractId.startsWith('PC-'), true);
 });
 
-test('margin change at roll creates a new contract, then a global and portfolio 1:1 split', () => {
+test('margin change at roll: create (manual), global split, then one split per PAM portfolio', () => {
   const ev = byAsset(detectSample(), 'A1005');
   assert.equal(ev.type, 'CONTRACT_CHANGE');
   assert.equal(ev.route, 'review');
   assert.deepEqual(ev.rollTermChanges.map(d => d.field), ['marginBps']);
-  assert.deepEqual(ev.messages.map(m => `${m.Step}:${m.Level}:${m.MessageType}`), [
-    '1:SMF:CONTRACT_CREATE', '2:GLOBAL:CONTRACT_SPLIT',
+  assert.deepEqual(ev.messages.map(m => `${m.step}:${m.level}:${m.type}${m.manual ? ':manual' : ''}`), [
+    '1:SMF:CONTRACT_CREATE:manual', '2:GLOBAL:CONTRACT_SPLIT',
     '2:PORTFOLIO:CONTRACT_SPLIT', '2:PORTFOLIO:CONTRACT_SPLIT', '2:PORTFOLIO:CONTRACT_SPLIT',
   ]);
-  const create = ev.messages[0];
-  assert.equal(create.MarginBps, 350);
-  assert.equal(create.ToContractID, ev.added[0].contractId, 'new PAM contract takes the AllVue contract ID');
-  assert.ok(ev.messages.slice(1).every(m => m.FromContractID === ev.lineageUpdates[0].pamContractId || m.ToContractID === create.ToContractID));
-  const portfolio = ev.messages.filter(m => m.Level === 'PORTFOLIO').reduce((s, m) => s + E.toCents(m.Units), 0);
-  assert.equal(portfolio, ev.expired[0].amount);
+  const newId = ev.added[0].contractId;
+  assert.equal(ev.messages[0].contractId, newId, 'new PAM contract takes the AllVue contract ID');
+  assert.equal(ev.messages[0].contract.marginBps, 350);
+  const global = ev.messages[1];
+  assert.equal(global.actionType, 8);
+  assert.equal(global.allocs.reduce((s, a) => s + a.units, 0), 0, 'global split nets to zero');
+  const portfolio = ev.messages.filter(m => m.level === 'PORTFOLIO');
+  assert.ok(portfolio.every(m => m.contractId !== newId && m.allocs.length === 1 && m.allocs[0].contractId === newId));
+  assert.equal(portfolio.reduce((s, m) => s + m.unitsExchanged, 0), ev.expired[0].amount);
 });
 
 test('split ties by new contract and by portfolio', () => {
@@ -69,29 +73,54 @@ test('split ties by new contract and by portfolio', () => {
   for (const line of ev.lines) {
     assert.equal(Object.values(line.allocation).reduce((s, v) => s + v, 0), line.amount);
   }
-  // Each portfolio's pieces add back to its share of the old contract.
+  // Each portfolio's split message moves exactly its share of the old contract.
   const holding = E.allocate(ev.expired[0].amount, ev.allocationBasis.map(b => ({ key: b.pamPortfolio, weight: b.weight })));
-  for (const p of Object.keys(holding)) {
-    assert.equal(ev.lines.reduce((s, l) => s + l.allocation[p], 0), holding[p]);
+  const portfolio = ev.messages.filter(m => m.level === 'PORTFOLIO');
+  assert.equal(portfolio.length, 3);
+  for (const m of portfolio) {
+    assert.equal(m.unitsExchanged, holding[m.pamPortfolio]);
+    assert.equal(m.allocs.reduce((s, a) => s + a.units, 0), m.unitsExchanged);
+    assert.equal(m.allocs.length, 2);
   }
-  assert.equal(ev.messages.filter(m => m.Level === 'SMF').length, 2);
-  assert.equal(ev.messages.filter(m => m.Level === 'GLOBAL').length, 2);
-  assert.equal(ev.messages.filter(m => m.Level === 'PORTFOLIO').length, 6);
+  assert.equal(ev.messages.filter(m => m.level === 'SMF').length, 2);
+  assert.equal(ev.messages.filter(m => m.level === 'GLOBAL').length, 1);
 });
 
 test('many to many is a combine into the first new contract, then a split', () => {
   const ev = byAsset(detectSample(), 'A1022', 'CLO-MASTER');
-  const order = [...new Set(ev.messages.map(m => `${m.Step}:${m.MessageType}`))];
+  const order = [...new Set(ev.messages.map(m => `${m.step}:${m.type}`))];
   assert.deepEqual(order, ['1:CONTRACT_CREATE', '2:CONTRACT_COMBINE', '3:CONTRACT_SPLIT']);
-  const split = ev.messages.find(m => m.MessageType === 'CONTRACT_SPLIT');
-  assert.equal(split.FromContractID, ev.added[0].contractId);
+  const combine = ev.messages.find(m => m.level === 'PORTFOLIO' && m.type === 'CONTRACT_COMBINE');
+  assert.equal(combine.contractId, ev.added[0].contractId, 'combine names the target contract');
+  assert.equal(combine.allocs.length, 2, 'and allocates from both sources');
+  const split = ev.messages.find(m => m.level === 'PORTFOLIO' && m.type === 'CONTRACT_SPLIT');
+  assert.equal(split.contractId, ev.added[0].contractId, 'split names the source contract');
 });
 
-test('global action carries global units, portfolio rows carry your units', () => {
+test('global action carries signed global units; portfolio paydowns are manual for now', () => {
   const ev = byAsset(detectSample(), 'A1009');
-  const global = ev.messages.filter(m => m.Level === 'GLOBAL');
+  const global = ev.messages.filter(m => m.level === 'GLOBAL');
   assert.equal(global.length, 1);
-  assert.equal(E.toCents(global[0].Units), -ev.totals.globalDelta);
+  assert.equal(global[0].actionType, 6);
+  assert.equal(global[0].allocs[0].units, ev.totals.globalDelta);
+  const manual = ev.messages.filter(m => m.manual);
+  assert.equal(manual.reduce((s, m) => s + m.unitsExchanged, 0), -ev.totals.fundedDelta);
+});
+
+test('PAM file text follows PAM syntax and numbers transactions', () => {
+  const events = detectSample();
+  const file = E.buildPamFile([byAsset(events, 'A1008')], { batchId: 'B1', startTxn: 9000001 });
+  assert.match(file.text, /^BANKLOANACTION\(\nAdd,\n,\nSecID\(3,PT-1008\),\n20261030,\n9,\n,\nBANKLOANACTIONCONTRACTALLOC\(/);
+  assert.match(file.text, /TaCONTRACTCOMBINE\(\nADD,\n9000001,\nSecID\(3,PT-1008\),\nCONTRACTSECID\(26,418216\),\n20261030,\n20261030,\nFUND-I,\nBNK\(BNK1,FUND-I Custody,\d+,CASHBANK\(CSH\)\),\n\d+\.\d{6},\nCONTRACTALLOC\(\nADD,\nCONTRACTALLOCREC\(SecID\(26,PC-\d+\),\d+\.\d{6}\),/);
+  assert.equal(file.nextTxn, 9000004);
+  assert.equal(file.before.length, 1);
+  const split = E.buildPamFile([byAsset(events, 'A1007')], { batchId: 'B2', startTxn: 1 }).text;
+  assert.match(split, /SETMTHD\(11\),\nTRDR\(\nM,\n\d{8},\n100\.0000000,/);
+});
+
+test('portfolio without bank details is an exception', () => {
+  const events = detectSample(d => { d.portfolioMap.find(r => r.PAMPortfolio === 'FUND-I').CustodyAccount = ''; });
+  assert.equal(byAsset(events, 'A1005').route, 'exception');
 });
 
 test('position change with no global change is a trade, not a paydown', () => {
@@ -104,7 +133,8 @@ test('increase on a capitalizing contract is PIK interest, not a term loan draw'
   const ev = byAsset(detectSample(), 'A1034');
   assert.equal(ev.route, 'review');
   assert.deepEqual(ev.legs, ['CAPITALIZE']);
-  assert.ok(ev.messages.every(m => m.MessageType === 'CAPITALIZE'));
+  assert.ok(ev.messages.every(m => m.type === 'CAPITALIZE'));
+  assert.equal(ev.messages.find(m => m.level === 'GLOBAL').actionType, 10);
   assert.ok(!ev.flags.some(f => /do not draw/.test(f.text)));
 });
 
@@ -117,8 +147,8 @@ test('revolver rollover with a paydown sends only the paydown', () => {
   const ev = byAsset(detectSample(), 'A1009');
   assert.equal(ev.type, 'ROLLOVER');
   assert.deepEqual(ev.legs, ['PAYDOWN']);
-  assert.ok(ev.messages.every(m => m.MessageType === 'PAYDOWN'));
-  const total = ev.messages.filter(m => m.Level === 'PORTFOLIO').reduce((s, m) => s + E.toCents(m.Units), 0);
+  assert.ok(ev.messages.every(m => m.type === 'PAYDOWN'));
+  const total = ev.messages.filter(m => m.level === 'PORTFOLIO').reduce((s, m) => s + m.unitsExchanged, 0);
   assert.equal(total, E.toCents(2000000));
 });
 

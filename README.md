@@ -59,8 +59,8 @@ Load these on **Setup and data** as CSV. Header names must match.
 | File | Columns |
 |---|---|
 | AllVue contracts (prior and current day) | `AsOfDate, AllVuePortfolio, AssetID, AssetName, FacilityType, ContractID, ContractType, StartDate, EndDate, Amount, GlobalAmount, Commitment, RateType, InterestType, BaseRate, Tenor, MarginBps, FloorPct, PayFreq, ResetFreq, DayCount` |
-| Portfolio map | `AllVuePortfolio, PAMPortfolio` |
-| Tranche map | `AssetID, PAMTrancheID, FacilityType` |
+| Portfolio map | `AllVuePortfolio, PAMPortfolio, Bank, CustodyAccount, CashAccount, CashBank` |
+| Tranche map | `AssetID, PAMTrancheID, FacilityType, MaturityDate` |
 | PAM positions | `PAMPortfolio, PAMTrancheID, Funded, Unfunded` |
 | Contract lineage | `AllVueContractID, PAMContractID` |
 | AllVue unfunded fee export | `AllVuePortfolio, AssetID, AssetName, FacilityType, FeeType, PeriodStart, PeriodEnd, FeeRateBps, AverageUnfunded, DayCount, Amount, AllVueTransactionID` |
@@ -69,26 +69,24 @@ Load these on **Setup and data** as CSV. Header names must match.
 
 ## PAM import file
 
-Each event becomes messages in PAM's load order, all in one file:
+Contract events produce a PAM message file (`PAM_IMPORT_<batch>.txt`) in PAM's import syntax, in load order:
 
-1. **Create contract** (security master): one row per new contract with its terms. New contracts take the AllVue contract ID.
+1. **Create contract** (security master), one per new contract. New contracts take the AllVue contract ID. *The create message format hasn't been supplied yet, so these appear as a "before loading" checklist on the file.*
 2. For each step (combine, split, then paydown, draw or capitalized interest):
-   - one **global action** row per contract moved, in global units, to update the security master's global units (the transaction generate job stays off);
-   - **portfolio transactions**, one row per PAM portfolio, in your units.
-
-How events map to steps:
+   - one **`BANKLOANACTION`** global action, with signed global units per contract (sources negative, targets positive). Types: 8 contract split, 9 contract combine; 6 contract redemption, 4 drawdown and 10 interest capitalization are assumed for paydowns, draws and PIK and need confirming. The transaction generate job stays off.
+   - one **`TaCONTRACTSPLIT`** per PAM portfolio (the source contract in `CONTRACTSECID`, targets in `CONTRACTALLOC`) or **`TaCONTRACTCOMBINE`** (the target in `CONTRACTSECID`, sources in `CONTRACTALLOC`), with `BNK()` from the portfolio map, a transaction number and a `CCID`. *Portfolio paydown, draw and capitalization formats haven't been supplied yet, so these appear as an "after loading" checklist.*
 
 | Event | Steps |
 |---|---|
 | Clean rollover | Nothing |
-| Rollover with paydown, draw or PIK, same terms | Paydown/draw/capitalize on the existing PAM contract |
+| Rollover with paydown, draw or PIK, same terms | Global action on the existing PAM contract (+ manual portfolio transactions) |
 | Terms change (1:1) | Create → split old → new → any paydown/draw |
 | Split (1 → many) | Create each → split → any paydown/draw spread by size |
 | Combine (many → 1) | Create → combine → any paydown/draw |
 | Many → many | Create each → combine into the first new contract → split out to the others → any paydown/draw |
 | Draw into a new contract | Create → draw |
 
-PAM closes emptied contracts itself. Columns (placeholder): `BatchID, Seq, EventKey, Step, Level, MessageType, PAMPortfolio, PAMTrancheID, FromContractID, ToContractID, EffectiveDate, EndDate, Units, BaseRate, Tenor, MarginBps, FloorPct, PayFreq, ResetFreq, DayCount`. `Level` is `SMF`, `GLOBAL` or `PORTFOLIO`.
+PAM closes emptied contracts itself. Transaction numbers run on from the **Next PAM transaction number** on the Setup tab. The `TRDR()` block on splits (method `M`, the tranche maturity date, price 100) and `SETMTHD(11)` are copied from PAM's sample and should be confirmed. Security ID types are 3 for the facility (the PAM tranche ID) and 26 for contracts; see `PAM` in `src/engine.js`.
 
 Fee files use `BatchID, Seq, FeeKey, TransactionType, FeeType, PAMPortfolio, PAMTrancheID, PeriodStart, PeriodEnd, Amount, AllVueTransactionID` with transaction type `UNFUNDED_FEE`. Also a placeholder.
 

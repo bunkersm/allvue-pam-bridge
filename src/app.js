@@ -6,7 +6,7 @@
   'use strict';
   const E = window.Engine;
   const S = window.SampleData;
-  const STORE_KEY = 'loan-event-bridge:v3';
+  const STORE_KEY = 'loan-event-bridge:v4';
 
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const money = E.formatMoney;
@@ -52,8 +52,8 @@
   const INPUTS = [
     { key: 'prior', title: 'AllVue contracts, prior day', layout: 'allvue', desc: 'Contract-level export from the previous business day. Detection compares it with the current day.' },
     { key: 'current', title: 'AllVue contracts, current day', layout: 'allvue', desc: 'Same export for the day you are processing. Its AsOfDate becomes the run date.' },
-    { key: 'portfolioMap', title: 'Portfolio map', layout: 'portfolioMap', desc: 'One row per PAM portfolio fed by an AllVue portfolio.' },
-    { key: 'trancheMap', title: 'Tranche map', layout: 'trancheMap', desc: 'Links each AllVue asset to its PAM facility tranche.' },
+    { key: 'portfolioMap', title: 'Portfolio map', layout: 'portfolioMap', desc: 'One row per PAM portfolio fed by an AllVue portfolio, with the bank and custody details used in its PAM messages.' },
+    { key: 'trancheMap', title: 'Tranche map', layout: 'trancheMap', desc: 'Links each AllVue asset to its PAM facility security ID, with the maturity date used in contract splits.' },
     { key: 'pamPositions', title: 'PAM positions', layout: 'pamPositions', desc: 'Funded and unfunded position per PAM portfolio and tranche. Used for tie-out and allocation.' },
     { key: 'lineage', title: 'Contract lineage', layout: 'lineage', desc: 'Which PAM contract each live AllVue contract represents.' },
     { key: 'fees', title: 'AllVue unfunded fee export', layout: 'fees', desc: 'Monthly commitment and ticking fees. PeriodEnd is the last accrual day.' },
@@ -85,6 +85,7 @@
       fees: [],
       feeFilter: 'review',
       lastFeeRun: null,
+      nextTxn: 9000001,
     };
   }
 
@@ -112,6 +113,8 @@
   const statusOf = ev => (state.status[ev.key] || {}).status || 'pending';
   const statusInfo = ev => state.status[ev.key] || {};
   const eventByKey = key => state.events.find(e => e.key === key);
+  // Messages that go in the PAM file (events also carry manual steps; fees are all file rows).
+  const fileMsgs = ev => ev.messages.filter(m => !m.manual);
   const feeByKey = key => state.fees.find(f => f.key === key);
   const itemByKey = key => eventByKey(key) || feeByKey(key);
   const periodText = f => `${f.periodStart} to ${f.periodEnd}`;
@@ -142,6 +145,7 @@
         current: E.normalizeAllVue(i.current),
         trancheMap: E.normalizeTrancheMap(i.trancheMap),
         portfolioMap: E.normalizePortfolioMap(i.portfolioMap),
+        accounts: E.normalizePortfolioAccounts(i.portfolioMap),
         pamPositions: E.normalizePamPositions(i.pamPositions),
         lineage: state.lineage,
       });
@@ -214,10 +218,11 @@
       const ev = itemByKey(key);
       if (!ev || !requireUser()) return;
       const note = commentValue();
-      setStatus(key, ev.messages.length ? 'approved' : 'closed', note);
+      const n = fileMsgs(ev).length;
+      setStatus(key, n ? 'approved' : 'closed', note);
       applyLineage(ev);
       log('Approved', key, eventLabel(ev), note);
-      toast(ev.messages.length ? `Approved. ${ev.messages.length} PAM messages will go in the next file.` : 'Approved. Nothing is sent to PAM for this event.');
+      toast(n ? `Approved. ${n} PAM messages will go in the next file.` : 'Approved. Nothing is sent to PAM for this event.');
     },
     approveCleanFees() {
       const ready = state.fees.filter(f => statusOf(f) === 'ready');
@@ -297,27 +302,39 @@
     const prefix = isFee ? 'F' : 'B';
     const n = state.batches.filter(b => b.asOfDate === state.asOfDate && b.id.startsWith(prefix)).length + 1;
     const id = `${prefix}${state.asOfDate.replace(/-/g, '')}-${String(n).padStart(2, '0')}`;
-    const rows = E.buildBatchRows(items, id);
-    const fileName = `${isFee ? 'PAM_FEES' : 'PAM_IMPORT'}_${id}.csv`;
+    let file = null;
+    let rows = [];
+    if (isFee) rows = E.buildBatchRows(items, id);
+    else {
+      file = E.buildPamFile(items, { batchId: id, startTxn: state.nextTxn });
+      state.nextTxn = file.nextTxn;
+    }
+    const count = isFee ? rows.length : file.messageCount;
+    const fileName = isFee ? `PAM_FEES_${id}.csv` : `PAM_IMPORT_${id}.txt`;
     state.batches.unshift({
       id,
       kind,
-      layout: isFee ? 'pamFeeImport' : 'pamImport',
+      layout: isFee ? 'pamFeeImport' : null,
+      format: isFee ? 'csv' : 'pam',
+      text: file ? file.text : null,
+      before: file ? file.before : [],
+      after: file ? file.after : [],
+      messageCount: count,
       fileName,
       asOfDate: state.asOfDate,
       createdAt: now(),
       createdBy: state.user,
-      events: items.map(e => ({ key: e.key, label: eventLabel(e), messages: e.messages.length })),
+      events: items.map(e => ({ key: e.key, label: eventLabel(e), messages: fileMsgs(e).length })),
       rows,
       status: 'awaiting',
       results: {},
     });
     items.forEach(e => setStatus(e.key, 'in_batch', '', { batchId: id }));
-    log('Created PAM file', id, fileName, `${items.length} ${isFee ? 'fees' : 'events'}, ${rows.length} messages`);
+    log('Created PAM file', id, fileName, `${items.length} ${isFee ? 'fees' : 'events'}, ${count} messages`);
     state.selectedBatch = id;
     state.view = 'batches';
     state.selectedKey = null;
-    toast(`Created ${id} with ${rows.length} messages. Import it through PAM's import browser, then record the result.`);
+    toast(`Created ${id} with ${count} messages. Import it through PAM's import browser, then record the result.`);
   }
 
   // ------------------------------------------------------------------ rendering helpers
@@ -432,7 +449,7 @@
           <td class="mono">${esc(ev.effectiveDate)}</td>
           <td class="mono">${esc(contractsSummary(ev))}</td>
           <td class="num">${deltaCell(ev.totals.fundedDelta)}</td>
-          <td class="num">${ev.messages.length || '<span class="muted">0</span>'}</td>
+          <td class="num">${fileMsgs(ev).length || '<span class="muted">0</span>'}</td>
           <td class="small">${ev.flags.some(f => f.level === 'exception') ? `<span style="color:var(--bad)">${issueCount(ev)}</span>` : issueCount(ev) ? `<span style="color:var(--warn)">${issueCount(ev)}</span>` : '<span class="muted">Passed</span>'}</td>
         </tr>`;
       }).join('')}</tbody></table></div>`;
@@ -534,17 +551,17 @@
 
   function messageTable(ev) {
     if (!ev.messages.length) return '<p class="muted">No PAM messages for this event.</p>';
-    const levelLabel = { SMF: 'Security master', GLOBAL: 'Global action', PORTFOLIO: 'Portfolio' };
-    return `<div class="table-wrap"><table>
-      <thead><tr><th class="num">Step</th><th>Level</th><th>Message</th><th>PAM portfolio</th><th>From</th><th>To</th><th class="num">Units</th><th>Terms</th></tr></thead>
-      <tbody>${ev.messages.map(m => `<tr>
-        <td class="num">${esc(m.Step)}</td><td class="small nowrap">${levelLabel[m.Level] || esc(m.Level)}</td><td class="mono nowrap">${esc(m.MessageType)}</td>
-        <td class="mono nowrap">${esc(m.PAMPortfolio) || '<span class="muted">n/a</span>'}</td>
-        <td class="mono nowrap">${esc(m.FromContractID)}</td><td class="mono nowrap">${esc(m.ToContractID)}</td>
-        <td class="num">${m.Units === '' ? '' : money(E.toCents(m.Units))}</td>
-        <td class="small" style="min-width:220px">${m.Level === 'SMF' ? esc(`${m.BaseRate} ${m.Tenor} + ${m.MarginBps} bps, floor ${m.FloorPct}, ${m.PayFreq}, ${m.DayCount}, ${m.EffectiveDate} to ${m.EndDate}`) : ''}</td></tr>`).join('')}</tbody>
-    </table></div>
-    <p class="small muted">Load order: new contracts first, then each step's global action, then its portfolio transactions. PAM closes emptied contracts itself.</p>`;
+    const levelLabel = { SMF: 'Create contract', GLOBAL: 'Global action', PORTFOLIO: 'Portfolio transaction' };
+    const typeLabel = { CONTRACT_SPLIT: 'contract split', CONTRACT_COMBINE: 'contract combine', PAYDOWN: 'paydown', DRAW: 'draw', CAPITALIZE: 'interest capitalization', CONTRACT_CREATE: '' };
+    const before = ev.messages.filter(m => m.manual && m.level === 'SMF');
+    const after = ev.messages.filter(m => m.manual && m.level !== 'SMF');
+    const blocks = fileMsgs(ev).map(m => `<div class="stack">
+        <div class="small"><b>Step ${m.step}</b> · ${levelLabel[m.level]}${typeLabel[m.type] ? `, ${typeLabel[m.type]}` : ''}${m.pamPortfolio ? ` · <span class="mono">${esc(m.pamPortfolio)}</span>` : ''}${m.level === 'GLOBAL' ? ` · type ${m.actionType}` : ''}</div>
+        <pre class="file">${esc(E.pamMessageText(m, { txnNumber: 'TBD', ccid: 'TBD' }))}</pre></div>`).join('');
+    return `${checklist('Before loading: create these contracts in PAM', before.map(m => ({ text: E.manualStepText(m) })))}
+      ${blocks || '<p class="muted">No messages go in the PAM file for this event.</p>'}
+      ${checklist('After loading: book these in PAM', after.map(m => ({ text: E.manualStepText(m) })))}
+      <p class="small muted">Load order: each step's global action, then its portfolio transactions. Transaction numbers and CCIDs are assigned when the file is created. PAM closes emptied contracts itself.</p>`;
   }
 
   function actionsFor(ev) {
@@ -558,7 +575,7 @@
       case 'ready':
         return `${comment('Optional for approval, required to reject')}
           <div class="row">
-            <button class="btn primary" data-action="approve" data-key="${esc(ev.key)}">${ev.messages.length ? `Approve, ${ev.messages.length} PAM messages` : 'Approve, nothing to send'}</button>
+            <button class="btn primary" data-action="approve" data-key="${esc(ev.key)}">${fileMsgs(ev).length ? `Approve, ${fileMsgs(ev).length} PAM messages` : 'Approve, nothing to send'}</button>
             <button class="btn danger" data-action="reject" data-key="${esc(ev.key)}">Reject</button>
           </div>`;
       case 'exception':
@@ -620,7 +637,7 @@
               <div><dt>PAM tranche</dt><dd class="mono">${esc(ev.pamTrancheId) || 'Not mapped'}</dd></div>
             </dl></section>
           <section><h3>Allocation to PAM portfolios</h3>${allocationTable(ev)}</section>
-          <section><div class="section-head"><h3>PAM messages</h3>${ev.messages.length ? '<button class="btn ghost" data-action="copyMessages">Copy as CSV</button>' : ''}</div>${messageTable(ev)}</section>
+          <section><div class="section-head"><h3>PAM messages</h3>${fileMsgs(ev).length ? '<button class="btn ghost" data-action="copyMessages">Copy messages</button>' : ''}</div>${messageTable(ev)}</section>
           <section><h3>Event key</h3><p class="mono small" style="word-break:break-all">${esc(ev.key)}</p><p class="small muted">The same AllVue change always produces the same key, so re-running detection never creates a duplicate.</p></section>
           ${history.length ? `<section><h3>History</h3><ul class="flags">${history.map(h => `<li class="flag info"><b>${esc(h.action)}</b> by ${esc(h.user)}, ${fmtTime(h.at)}${h.note ? `. “${esc(h.note)}”` : ''}</li>`).join('')}</ul></section>` : ''}
         </div>
@@ -758,9 +775,16 @@
     return `
       <section class="section">${readyPanel('event')}${readyPanel('fee')}</section>
       <section class="section">
-        <div class="section-head"><h2>PAM files</h2><span class="muted small">Layout is a placeholder until the real PAM import formats are added.</span></div>
+        <div class="section-head"><h2>PAM files</h2><span class="muted small">Split, combine and global action messages follow PAM's samples. The fee file layout is still a placeholder.</span></div>
         ${list || '<div class="panel empty">No PAM files yet. Approve events or fees, then create a file here.</div>'}
       </section>`;
+  }
+
+  const batchContent = b => (b.format === 'pam' ? b.text : E.toCSV(b.rows, E.LAYOUTS[b.layout || 'pamFeeImport']));
+
+  function checklist(title, items) {
+    if (!items || !items.length) return '';
+    return `<div class="stack"><h3>${esc(title)}</h3><ul class="flags">${items.map(x => `<li class="flag review">${esc(x.text)}</li>`).join('')}</ul></div>`;
   }
 
   function batchPanel(b) {
@@ -768,7 +792,8 @@
       : b.status === 'loaded' ? '<span class="chip c-loaded">All loaded</span>'
         : '<span class="chip c-exception">Some messages failed</span>';
     const open = state.selectedBatch === b.id || (!state.selectedBatch && b === state.batches[0]);
-    const csv = E.toCSV(b.rows, E.LAYOUTS[b.layout || 'pamImport']);
+    const csv = batchContent(b);
+    const msgCount = b.messageCount ?? b.rows.length;
     const noun = b.kind === 'fee' ? 'fees' : 'events';
     const resultRows = b.events.map((item, i) => {
       const r = b.results[item.key];
@@ -782,15 +807,17 @@
     return `<details class="panel panel-pad batch" ${open ? 'open' : ''}>
       <summary><span class="batch-head" style="display:inline-flex;width:calc(100% - 20px)">
         <span><span class="mono" style="font-weight:600">${esc(b.id)}</span> <span class="muted small">${esc(b.fileName)}</span></span>
-        <span class="row">${statusChip}<span class="small muted">${b.events.length} ${noun}, ${b.rows.length} messages · ${esc(b.createdBy)}, ${fmtTime(b.createdAt)}</span></span>
+        <span class="row">${statusChip}<span class="small muted">${b.events.length} ${noun}, ${msgCount} messages · ${esc(b.createdBy)}, ${fmtTime(b.createdAt)}</span></span>
       </span></summary>
       <div class="stack">
         <div class="row">
           <button class="btn" data-action="copyBatch" data-batch="${esc(b.id)}">Copy file contents</button>
-          <button class="btn" data-action="downloadBatch" data-batch="${esc(b.id)}">Download .csv</button>
+          <button class="btn" data-action="downloadBatch" data-batch="${esc(b.id)}">Download ${b.format === 'pam' ? '.txt' : '.csv'}</button>
           <span class="small muted">Download works when the app runs from your computer. In the hosted preview, use Copy.</span>
         </div>
+        ${checklist('Before loading: create these contracts in PAM', b.before)}
         <pre class="file" id="file-${esc(b.id)}">${esc(csv)}</pre>
+        ${checklist('After loading: book these portfolio transactions in PAM', b.after)}
         <h3>Import result</h3>
         <div class="table-wrap"><table>
           <thead><tr><th>${b.kind === 'fee' ? 'Fee' : 'Event'}</th><th class="num">Msgs</th><th>Result</th><th>PAM import browser error</th></tr></thead>
@@ -825,6 +852,7 @@
             <div><dt>Data in use</dt><dd>${esc(state.sourceLabel)}</dd></div>
             <div><dt>Run date</dt><dd class="mono">${esc(state.asOfDate)}</dd></div>
             <div><dt>Compared with</dt><dd class="mono">${esc(state.priorAsOfDate)}</dd></div>
+            <div><dt>Next PAM transaction number</dt><dd><input type="text" id="next-txn" inputmode="numeric" value="${esc(state.nextTxn)}" aria-label="Next PAM transaction number" style="width:12ch"></dd></div>
           </dl>
           <div class="row">
             <button class="btn primary" data-action="rerun">Run detection</button>
@@ -844,7 +872,8 @@
             <li>1 expiring → 1 new with the same terms is a <b>rollover</b>. With a different rate type, interest type, base rate, margin, tenor, floor, pay or reset frequency, or day count it is a <b>contract change</b>.</li>
             <li>1 → many is a <b>split</b>, many → 1 is a <b>combine</b>, many → many is a <b>complex restructure</b>. New contracts with nothing expiring are a <b>draw</b>.</li>
             <li>A lower funded total is a <b>paydown</b>; a higher one is a <b>draw</b>, or <b>capitalized interest</b> when the contract's interest type is Capitalize or Partial. These are booked after any split or combine.</li>
-            <li>PAM message order for each event: <b>create</b> new contracts (security master), then for each step a <b>global action</b> with global units, then <b>portfolio transactions</b>. A terms change is a new contract plus a 1:1 split; many → many is a combine then a split. New contracts take the AllVue contract ID.</li>
+            <li>PAM message order for each event: <b>create</b> new contracts (security master), then for each step one <b>BANKLOANACTION</b> global action with signed global units per contract, then one <b>TaCONTRACTSPLIT</b> or <b>TaCONTRACTCOMBINE</b> per PAM portfolio. A terms change is a new contract plus a 1:1 split; many → many is a combine then a split. New contracts take the AllVue contract ID.</li>
+            <li>Contract creates and portfolio paydown, draw and capitalization messages are listed as manual steps until their PAM formats are added.</li>
             <li>If your position changes but the global amount does not, it is treated as a <b>trade</b>, not a paydown or draw. A change that isn't your share of the global change goes to review.</li>
             <li>A rollover is <b>clean</b> and needs no PAM message when amount and terms match and the new period is regular (${esc(tenors)}).</li>
             <li><b>Exceptions</b>: asset or portfolio not mapped, PAM positions not tying to AllVue before the event, funded plus unfunded not equal to commitment, term loan draws, draws larger than unfunded, missing PAM contract lineage.</li>
@@ -958,17 +987,18 @@
       case 'openBatch': state.view = 'batches'; state.selectedBatch = batch; state.selectedKey = null; render(); return;
       case 'copyMessages': {
         const ev = itemByKey(state.selectedKey);
-        if (ev) copyText(E.toCSV(ev.messages, E.LAYOUTS[ev.kind === 'fee' ? 'pamFeeImport' : 'pamImport'].slice(2)), `${ev.messages.length} messages`);
+        if (ev && ev.kind === 'fee') copyText(E.toCSV(ev.messages, E.LAYOUTS.pamFeeImport.slice(2)), `${ev.messages.length} messages`);
+        else if (ev) copyText(fileMsgs(ev).map(m => E.pamMessageText(m, { txnNumber: 'TBD', ccid: 'TBD' })).join('\n\n'), `${fileMsgs(ev).length} messages`);
         return;
       }
       case 'copyBatch': {
         const b = state.batches.find(x => x.id === batch);
-        if (b) copyText(E.toCSV(b.rows, E.LAYOUTS[b.layout || 'pamImport']), b.fileName, document.getElementById(`file-${b.id}`));
+        if (b) copyText(batchContent(b), b.fileName, document.getElementById(`file-${b.id}`));
         return;
       }
       case 'downloadBatch': {
         const b = state.batches.find(x => x.id === batch);
-        if (b) download(b.fileName, E.toCSV(b.rows, E.LAYOUTS[b.layout || 'pamImport']));
+        if (b) download(b.fileName, batchContent(b));
         return;
       }
       case 'copyInput': {
@@ -1005,6 +1035,10 @@
 
   document.addEventListener('input', e => {
     if (e.target.id === 'user-name') { state.user = e.target.value; save(); }
+    if (e.target.id === 'next-txn') {
+      const n = Number(e.target.value.trim());
+      if (Number.isInteger(n) && n > 0) { state.nextTxn = n; save(); }
+    }
     if (e.target.id === 'queue-search') {
       state.search = e.target.value;
       document.getElementById('queue-table').innerHTML = queueTable();
