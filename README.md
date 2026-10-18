@@ -69,7 +69,7 @@ Load these on **Setup and data** as CSV. Header names must match.
 
 ## PAM import file
 
-Contract events produce a PAM message file (`PAM_IMPORT_<batch>.txt`) in PAM's import syntax, in load order:
+Contract events produce a PAM message file (`PAM_IMPORT_<batch>.txt`) in PAM's import syntax, one message per line (single-line, newline-terminated), in load order:
 
 1. **Create contract**: one `SMFBANKLOANTRANCHE(UPDATE, …)` per event, adding every new contract on the tranche as an `SMFBANKLOANCONTRACTREC`, following the PAM bank loan contract add build spec (minimal message, validated before it goes in the file; the spec's golden string is a test). New contracts take the AllVue contract ID.
 2. For each step (combine, split, then paydown, draw or capitalized interest):

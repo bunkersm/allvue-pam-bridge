@@ -556,11 +556,11 @@
     const after = ev.messages.filter(m => m.manual && m.level !== 'SMF');
     const blocks = fileMsgs(ev).map(m => `<div class="stack">
         <div class="small"><b>Step ${m.step}</b> · ${levelLabel[m.level]}${typeLabel[m.type] ? `, ${typeLabel[m.type]}` : ''}${m.pamPortfolio ? ` · <span class="mono">${esc(m.pamPortfolio)}</span>` : ''}${m.level === 'GLOBAL' ? ` · type ${m.actionType}` : ''}</div>
-        <pre class="file">${esc(E.pamMessageText(m, { ccid: 'TBD', pretty: m.level === 'SMF' }))}</pre></div>`).join('');
+        <pre class="file">${esc(E.pamMessageText(m, { ccid: 'TBD', pretty: true }))}</pre></div>`).join('');
     return `${checklist('Before loading: create these contracts in PAM', before.map(m => ({ text: E.manualStepText(m) })))}
       ${blocks || '<p class="muted">No messages go in the PAM file for this event.</p>'}
       ${checklist('After loading: book these in PAM', after.map(m => ({ text: E.manualStepText(m) })))}
-      <p class="small muted">Load order: the contract create (shown indented here, one line in the file), then each step's global action and its portfolio transactions. PAM assigns transaction numbers on load; CCIDs are assigned when the file is created. PAM closes emptied contracts itself.</p>`;
+      <p class="small muted">Load order: the contract create, then each step's global action and its portfolio transactions. Shown indented here; in the file each message is on its own single line. PAM assigns transaction numbers on load; CCIDs are assigned when the file is created. PAM closes emptied contracts itself.</p>`;
   }
 
   function actionsFor(ev) {
@@ -986,7 +986,7 @@
       case 'copyMessages': {
         const ev = itemByKey(state.selectedKey);
         if (ev && ev.kind === 'fee') copyText(E.toCSV(ev.messages, E.LAYOUTS.pamFeeImport.slice(2)), `${ev.messages.length} messages`);
-        else if (ev) copyText(fileMsgs(ev).map(m => E.pamMessageText(m, { ccid: 'TBD' })).join('\n\n'), `${fileMsgs(ev).length} messages`);
+        else if (ev) copyText(fileMsgs(ev).map(m => `${E.pamMessageText(m, { ccid: 'TBD' })}\n`).join(''), `${fileMsgs(ev).length} messages`);
         return;
       }
       case 'copyBatch': {

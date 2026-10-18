@@ -109,16 +109,20 @@ test('global action carries signed global units; portfolio paydowns are manual f
   assert.equal(manual.reduce((s, m) => s + m.unitsExchanged, 0), -ev.totals.fundedDelta);
 });
 
-test('PAM file text follows PAM syntax and numbers transactions', () => {
+test('PAM file has one single-line message per line, in load order', () => {
   const events = detectSample();
   const file = E.buildPamFile([byAsset(events, 'A1008')], { batchId: 'B1' });
-  assert.match(file.text, /\n\nBANKLOANACTION\(\nAdd,\n,\nSecID\(3,PT-1008\),\n20261030,\n9,\n,\nBANKLOANACTIONCONTRACTALLOC\(/);
-  assert.match(file.text, /TaCONTRACTCOMBINE\(\nADD,\n,\nSecID\(3,PT-1008\),\nCONTRACTSECID\(26,418216\),\n20261030,\n20261030,\nFUND-I,\nBNK\(BNK1,FUND-I Custody,\d+,CASHBANK\(CSH\)\),\n\d+\.\d{6},\nCONTRACTALLOC\(\nADD,\nCONTRACTALLOCREC\(SecID\(26,PC-\d+\),\d+\.\d{6}\),/);
-  assert.ok(!/ADD,\n\d/.test(file.text), 'no transaction numbers: PAM assigns them');
+  assert.ok(file.text.endsWith('\n'));
+  const lines = file.text.trimEnd().split('\n');
+  assert.equal(lines.length, file.messageCount);
+  assert.deepEqual(lines.map(l => l.slice(0, l.indexOf('('))), ['SMFBANKLOANTRANCHE', 'BANKLOANACTION', 'TaCONTRACTCOMBINE', 'TaCONTRACTCOMBINE', 'TaCONTRACTCOMBINE']);
+  lines.forEach(l => { assert.ok(!l.includes('\n')); E.assertBalanced(l); });
+  assert.match(lines[0], /^SMFBANKLOANTRANCHE\(UPDATE,SecID\(3,PT-1008\),,2,\d{8},1,SMFBANKLOANCONTRACT\(REPLACE,SMFBANKLOANCONTRACTREC\(REPLACE,SecID\(26,418216\), ,B,/);
+  assert.match(lines[1], /^BANKLOANACTION\(Add,,SecID\(3,PT-1008\),20261030,9,,BANKLOANACTIONCONTRACTALLOC\(BANKLOANACTIONCONTRACTALLOCREC\(ContractSecID\(26,PC-\d+\),-\d+\.\d{6}\),/);
+  assert.match(lines[2], /^TaCONTRACTCOMBINE\(ADD,,SecID\(3,PT-1008\),CONTRACTSECID\(26,418216\),20261030,20261030,FUND-I,BNK\(BNK1,FUND-I Custody,\d+,CASHBANK\(CSH\)\),\d+\.\d{6},CONTRACTALLOC\(ADD,CONTRACTALLOCREC\(SecID\(26,PC-\d+\),\d+\.\d{6}\),CONTRACTALLOCREC\(SecID\(26,PC-\d+\),\d+\.\d{6}\)\),CCID\(B1-0003,20261030,0\)\)$/);
   assert.equal(file.before.length, 0);
-  assert.match(file.text, /^SMFBANKLOANTRANCHE\(UPDATE,SecID\(3,PT-1008\),,2,\d{8},1,SMFBANKLOANCONTRACT\(REPLACE,SMFBANKLOANCONTRACTREC\(REPLACE,SecID\(26,418216\), ,B,/);
-  const split = E.buildPamFile([byAsset(events, 'A1007')], { batchId: 'B2' }).text;
-  assert.match(split, /SETMTHD\(11\),\nTRDR\(\nM,\n\d{8},\n100\.0000000,/);
+  const split = E.buildPamFile([byAsset(events, 'A1007')], { batchId: 'B2' }).text.split('\n').find(l => l.startsWith('TaCONTRACTSPLIT'));
+  assert.match(split, /^TaCONTRACTSPLIT\(ADD,,SecID\(3,PT-1007\),CONTRACTSECID\(26,PC-\d+\),20261030,20261030,FUND-I,BNK\(.*\),\d+\.\d{6},0\.000000,,CONTRACTALLOC\(ADD,.*\),SETMTHD\(11\),TRDR\(M,\d{8},100\.0000000,0\.000000000000000,,(0\.000000000000000,){6},\),CCID\(B2-\d{4},20261030,0\)\)$/);
 });
 
 test('portfolio without bank details is an exception', () => {
@@ -341,4 +345,18 @@ test('contract add from AllVue data maps codes and blocks bad input as an except
   assert.equal(input.base_index, 'SR3M');
   const bad = detectSample(d => { d.trancheMap.find(r => r.AssetID === 'A1006').MaturityDate = ''; });
   assert.equal(byAsset(bad, 'A1006').route, 'exception');
+});
+
+test('split, combine and global action match PAM samples (transaction number blank)', () => {
+  const account = { bank: 'BNK1', custodyAccount: 'Dummy Custody Account', cashAccount: '12345678', cashBank: 'CSH' };
+  const base = { level: 'PORTFOLIO', facilityId: 'DUMMYSEC001', effectiveDate: '2026-10-17', maturityDate: '2031-01-07', pamPortfolio: '9999', account };
+  assert.equal(
+    E.pamMessageText({ ...base, type: 'CONTRACT_COMBINE', contractId: 'CNTR0001', unitsExchanged: 20000000, allocs: [{ contractId: 'CNTR0002', units: 10000000 }, { contractId: 'CNTR0003', units: 10000000 }] }, { ccid: 'DUMMYCCID001' }),
+    'TaCONTRACTCOMBINE(ADD,,SecID(3,DUMMYSEC001),CONTRACTSECID(26,CNTR0001),20261017,20261017,9999,BNK(BNK1,Dummy Custody Account,12345678,CASHBANK(CSH)),200000.000000,CONTRACTALLOC(ADD,CONTRACTALLOCREC(SecID(26,CNTR0002),100000.000000),CONTRACTALLOCREC(SecID(26,CNTR0003),100000.000000)),CCID(DUMMYCCID001,20261017,0))');
+  assert.equal(
+    E.pamMessageText({ ...base, type: 'CONTRACT_SPLIT', contractId: 'CNTR0001', unitsExchanged: 10000000, allocs: [{ contractId: 'CNTR0002', units: 5000000 }, { contractId: 'CNTR0003', units: 5000000 }] }, { ccid: 'DUMMYCCID001' }),
+    'TaCONTRACTSPLIT(ADD,,SecID(3,DUMMYSEC001),CONTRACTSECID(26,CNTR0001),20261017,20261017,9999,BNK(BNK1,Dummy Custody Account,12345678,CASHBANK(CSH)),100000.000000,0.000000,,CONTRACTALLOC(ADD,CONTRACTALLOCREC(SecID(26,CNTR0002),50000.000000),CONTRACTALLOCREC(SecID(26,CNTR0003),50000.000000)),SETMTHD(11),TRDR(M,20310107,100.0000000,0.000000000000000,,0.000000000000000,0.000000000000000,0.000000000000000,0.000000000000000,0.000000000000000,0.000000000000000,,),CCID(DUMMYCCID001,20261017,0))');
+  assert.equal(
+    E.pamMessageText({ level: 'GLOBAL', facilityId: 'DUMMYSEC001', effectiveDate: '2026-10-17', actionType: 9, allocs: [{ contractId: 'CNTR0004', units: -100000000 }, { contractId: 'CNTR0002', units: 150000000 }, { contractId: 'CNTR0001', units: -50000000 }] }),
+    'BANKLOANACTION(Add,,SecID(3,DUMMYSEC001),20261017,9,,BANKLOANACTIONCONTRACTALLOC(BANKLOANACTIONCONTRACTALLOCREC(ContractSecID(26,CNTR0004),-1000000.000000),BANKLOANACTIONCONTRACTALLOCREC(ContractSecID(26,CNTR0002),1500000.000000),BANKLOANACTIONCONTRACTALLOCREC(ContractSecID(26,CNTR0001),-500000.000000)))');
 });

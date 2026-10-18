@@ -903,45 +903,37 @@
 
   const pamUnits = cents => `${fromCents(cents)}0000`;
 
-  /** Writes one PAM message in PAM's import syntax. */
-  function pamMessageText(m, { ccid = '', pretty = false } = {}) {
-    if (m.level === 'SMF') return pretty ? prettyPrint(contractAddNode(m.inputs)) : contractAddMessage(m.inputs);
-    const fac = `SecID(${PAM.facilityIdType},${m.facilityId})`;
-    const cid = id => `(${PAM.contractIdType},${id})`;
-    const ccidText = `CCID(${ccid},${pamDate(m.effectiveDate)},0)`;
+  /** Builds one PAM message as a tree (see node()) so every message serializes the same way. */
+  function pamMessageNode(m, { ccid = '' } = {}) {
+    if (m.level === 'SMF') return contractAddNode(m.inputs);
+    const fac = node('SecID', PAM.facilityIdType, m.facilityId);
+    const date = pamDate(m.effectiveDate);
     if (m.level === 'GLOBAL') {
-      return [
-        'BANKLOANACTION(',
-        'Add,',
-        ',',
-        `${fac},`,
-        `${pamDate(m.effectiveDate)},`,
-        `${m.actionType},`,
-        ',',
-        'BANKLOANACTIONCONTRACTALLOC(',
-        m.allocs.map(a => `BANKLOANACTIONCONTRACTALLOCREC(\nContractSecID${cid(a.contractId)},\n${pamUnits(a.units)}\n)`).join(',\n'),
-        ')',
-        ')',
-      ].join('\n');
+      return node('BANKLOANACTION', 'Add', null, fac, date, m.actionType, null,
+        node('BANKLOANACTIONCONTRACTALLOC', ...m.allocs.map(a =>
+          node('BANKLOANACTIONCONTRACTALLOCREC', node('ContractSecID', PAM.contractIdType, a.contractId), pamUnits(a.units)))));
     }
-    const bnk = `BNK(${m.account.bank},${m.account.custodyAccount},${m.account.cashAccount},CASHBANK(${m.account.cashBank}))`;
-    const alloc = ['CONTRACTALLOC(', 'ADD,', m.allocs.map(a => `CONTRACTALLOCREC(SecID${cid(a.contractId)},${pamUnits(a.units)})`).join(',\n'), '),'].join('\n');
+    const bnk = node('BNK', m.account.bank, m.account.custodyAccount, m.account.cashAccount, node('CASHBANK', m.account.cashBank));
+    const alloc = node('CONTRACTALLOC', 'ADD', ...m.allocs.map(a =>
+      node('CONTRACTALLOCREC', node('SecID', PAM.contractIdType, a.contractId), pamUnits(a.units))));
+    const ccidNode = node('CCID', ccid, date, 0);
+    // The transaction number (third argument) is blank: PAM assigns it on ADD.
     if (m.type === 'CONTRACT_COMBINE') {
-      return [
-        'TaCONTRACTCOMBINE(', 'ADD,', ',', `${fac},`, `CONTRACTSECID${cid(m.contractId)},`,
-        `${pamDate(m.effectiveDate)},`, `${pamDate(m.effectiveDate)},`, `${m.pamPortfolio},`, `${bnk},`,
-        `${pamUnits(m.unitsExchanged)},`, alloc, ccidText, ')',
-      ].join('\n');
+      return node('TaCONTRACTCOMBINE', 'ADD', null, fac, node('CONTRACTSECID', PAM.contractIdType, m.contractId),
+        date, date, m.pamPortfolio, bnk, pamUnits(m.unitsExchanged), alloc, ccidNode);
     }
-    return [
-      'TaCONTRACTSPLIT(', 'ADD,', ',', `${fac},`, `CONTRACTSECID${cid(m.contractId)},`,
-      `${pamDate(m.effectiveDate)},`, `${pamDate(m.effectiveDate)},`, `${m.pamPortfolio},`, `${bnk},`,
-      `${pamUnits(m.unitsExchanged)},`, '0.000000,', ',', alloc,
-      `SETMTHD(${PAM.settlementMethod}),`,
-      'TRDR(', 'M,', `${pamDate(m.maturityDate)},`, `${PAM.tradePrice},`, '0.000000000000000,', ',',
-      ...Array(6).fill('0.000000000000000,'), ',', '),',
-      ccidText, ')',
-    ].join('\n');
+    const zero = '0.000000000000000';
+    return node('TaCONTRACTSPLIT', 'ADD', null, fac, node('CONTRACTSECID', PAM.contractIdType, m.contractId),
+      date, date, m.pamPortfolio, bnk, pamUnits(m.unitsExchanged), '0.000000', null, alloc,
+      node('SETMTHD', PAM.settlementMethod),
+      node('TRDR', 'M', pamDate(m.maturityDate), PAM.tradePrice, zero, null, zero, zero, zero, zero, zero, zero, null, null),
+      ccidNode);
+  }
+
+  /** One PAM message on a single line, or indented for review with pretty. */
+  function pamMessageText(m, { ccid = '', pretty = false } = {}) {
+    const n = pamMessageNode(m, { ccid });
+    return pretty ? prettyPrint(n) : assertBalanced(serialize(n));
   }
 
   /** A short description of a message that has to be done by hand. */
@@ -977,7 +969,8 @@
       const opts = m.level === 'PORTFOLIO' ? { ccid: `${batchId}-${String(seq).padStart(4, '0')}` } : {};
       blocks.push(pamMessageText(m, opts));
     }));
-    return { text: blocks.join('\n\n') + (blocks.length ? '\n' : ''), messageCount: blocks.length, before, after, errors };
+    // One message per line, newline-terminated.
+    return { text: blocks.map(b => `${b}\n`).join(''), messageCount: blocks.length, before, after, errors };
   }
 
   // ---------------------------------------------------------------- unfunded fees
@@ -1104,7 +1097,7 @@
     normalizeAllVue, normalizeTrancheMap, normalizePortfolioMap, normalizePamPositions, normalizeLineage,
     allocate, detectEvents, buildBatchRows,
     FEE_TOLERANCE, FEE_POSITION_DRIFT, normalizeFees, expectedFee, checkFees,
-    PAM, normalizePortfolioAccounts, pamMessageText, manualStepText, buildPamFile,
+    PAM, normalizePortfolioAccounts, pamMessageNode, pamMessageText, manualStepText, buildPamFile,
     node, serialize, prettyPrint, assertBalanced, PAM_CONTRACT_DEFAULTS, EXCLUDED_CONTRACT_FIELDS,
     contractAddInput, validateContractAdd, contractAddNode, contractAddMessage,
   };
