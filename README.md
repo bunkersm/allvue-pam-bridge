@@ -75,7 +75,7 @@ Load these on **Setup and data** as CSV. Header names must match.
 | File | Columns |
 |---|---|
 | AllVue contracts (prior and current day) | `AsOfDate, AllVuePortfolio, AssetID, AssetName, FacilityType, ContractID, ContractType, StartDate, EndDate, Amount, GlobalAmount, Commitment, RateType, InterestType, BaseRate, Tenor, MarginBps, FloorPct, PayFreq, ResetFreq, DayCount` |
-| Portfolio map | `AllVuePortfolio, PAMPortfolio, Bank, CustodyAccount, CashAccount, CashBank` |
+| Portfolio map | `AllVuePortfolio, PAMPortfolio, Bank, BankName, CustodyAccount, CashBank` (the four `BNK()` fields, in order) |
 | Tranche map | `AssetID, PAMTrancheID, FacilityType, MaturityDate, PAMCurrency` |
 | PAM holdings | `AsOfDate, PAMPortfolio, PAMTrancheID, Funded, Unfunded` |
 | Contract lineage | `AllVueContractID, PAMContractID` |
@@ -90,7 +90,12 @@ Contract events produce a PAM message file (`PAM_IMPORT_<batch>.txt`) in PAM's i
 1. **Create contract**: one `SMFBANKLOANTRANCHE(UPDATE, …)` per event, adding every new contract on the tranche as an `SMFBANKLOANCONTRACTREC`, following the PAM bank loan contract add build spec (minimal message, validated before it goes in the file; the spec's golden string is a test). New contracts take the AllVue contract ID.
 2. For each step (combine, split, then paydown, draw or capitalized interest):
    - one **`BANKLOANACTION`** global action, with signed global units per contract (sources negative, targets positive). Types: 8 contract split, 9 contract combine; 6 contract redemption, 4 drawdown and 10 interest capitalization are assumed for paydowns, draws and PIK and need confirming. The transaction generate job stays off.
-   - one **`TaCONTRACTSPLIT`** per PAM portfolio (the source contract in `CONTRACTSECID`, targets in `CONTRACTALLOC`) or **`TaCONTRACTCOMBINE`** (the target in `CONTRACTSECID`, sources in `CONTRACTALLOC`), with `BNK()` from the portfolio map and a `CCID`. The transaction number is left blank; PAM assigns it on `ADD`. *Portfolio paydown, draw and capitalization formats haven't been supplied yet, so these appear as an "after loading" checklist.*
+   - portfolio transactions, with `BNK()` from the portfolio map. The transaction number is left blank; PAM assigns it on `ADD`.
+     - **`TaCONTRACTSPLIT`** per PAM portfolio (the source contract in `CONTRACTSECID`, targets in `CONTRACTALLOC`) or **`TaCONTRACTCOMBINE`** (the target in `CONTRACTSECID`, sources in `CONTRACTALLOC`), each with a `CCID`.
+     - **`TaContractRedemption`** for paydowns: one per contract per PAM portfolio, accrued interest 0 (per the TACONTRACTREDEMPTION minimum message spec).
+     - **`TaDrawDown`** for draws: one per PAM portfolio, `BLUNFUNDED` taking down the draw amount, `CONTRACTALLOC` to the contracts drawn into, trade, settle and delayed delivery date all the effective date (per the TADRAWDOWN minimum message spec).
+     - *Capitalized (PIK) interest has no format yet, so it appears as an "after loading" checklist.*
+   - No fund may redeem more than its funded PAM holding or draw more than its unfunded. A file warns about redemptions and drawdowns dated after today, which PAM rejects.
 
 | Event | Steps |
 |---|---|

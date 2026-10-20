@@ -190,7 +190,7 @@
     let acct = 12345670;
     return Object.entries(PAM_PORTFOLIOS).flatMap(([av, pams]) => pams.map(p => ({
       AllVuePortfolio: av, PAMPortfolio: p,
-      Bank: 'BNK1', CustodyAccount: `${p} Custody`, CashAccount: String(++acct), CashBank: 'CSH',
+      Bank: 'BNK1', BankName: 'Agent Bank', CustodyAccount: String(++acct), CashBank: 'CSH',
     })));
   }
 

@@ -17,7 +17,12 @@ Open work and questions for Loan Event Bridge, roughly in priority order.
 
 ## PAM message formats still needed
 
-- [ ] Portfolio-level paydown, draw and interest capitalization messages (currently an "after loading" checklist).
+- [x] Paydown (`TaContractRedemption`) and draw (`TaDrawDown`) portfolio messages, from the minimum message specs.
+- [ ] Portfolio-level interest capitalization (PIK) message (currently an "after loading" checklist).
+- [ ] **Validate `TaContractRedemption` against a PAM-generated message** (the spec isn't validated yet): CONTRACTSECID syntax, whether Units is needed alongside Principal, accrued interest with the paydown, back-dated redemption dates in a closed period.
+- [ ] `TaDrawDown` open items: the blank broker slot (PAM's own export omits it), whether CONTRACTALLOC can be left out, `BLUNFUNDEDTKDN(F)` meaning, and whether settlement date should differ from trade date.
+- [ ] Contract ID types: the drawdown example has a contract under ID type 10007 as well as 26. The app sends 26 for every contract.
+- [ ] Confirm the `BNK()` fields are bank, bank name, custody account, cash bank (the drawdown spec's order) for splits and combines too.
 - [ ] Confirm BANKLOANACTION types: 6 contract redemption (paydown), 4 drawdown (draw), 10 interest capitalization (PIK); whether Tranche Amount is needed.
 - [ ] Confirm the `TRDR()` fields on splits (method M, maturity date, price 100), ex date vs payment date, and what the CCID should hold.
 

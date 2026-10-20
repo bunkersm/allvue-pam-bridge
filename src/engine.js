@@ -45,7 +45,7 @@
       'StartDate', 'EndDate', 'Amount', 'GlobalAmount', 'Commitment', 'RateType', 'InterestType', 'BaseRate', 'Tenor', 'MarginBps', 'FloorPct',
       'PayFreq', 'ResetFreq', 'DayCount'],
     trancheMap: ['AssetID', 'PAMTrancheID', 'FacilityType', 'MaturityDate', 'PAMCurrency'],
-    portfolioMap: ['AllVuePortfolio', 'PAMPortfolio', 'Bank', 'CustodyAccount', 'CashAccount', 'CashBank'],
+    portfolioMap: ['AllVuePortfolio', 'PAMPortfolio', 'Bank', 'BankName', 'CustodyAccount', 'CashBank'],
     pamPositions: ['AsOfDate', 'PAMPortfolio', 'PAMTrancheID', 'Funded', 'Unfunded'],
     lineage: ['AllVueContractID', 'PAMContractID'],
 
@@ -65,6 +65,8 @@
     // BANKLOANACTION types. Split and combine are from PAM's samples; the
     // paydown, draw and capitalization codes are from PAM's type list and
     // still need confirming.
+    // Drawdowns take unfunded lots in this order (F, assumed FIFO, from PAM's export).
+    unfundedTakedown: 'F',
     actionType: { CONTRACT_SPLIT: 8, CONTRACT_COMBINE: 9, PAYDOWN: 6, DRAW: 4, CAPITALIZE: 10 },
   };
 
@@ -207,7 +209,7 @@
     const map = {};
     rows.forEach(r => {
       const pam = (r.PAMPortfolio || '').trim();
-      if (pam) map[pam] = { bank: (r.Bank || '').trim(), custodyAccount: (r.CustodyAccount || '').trim(), cashAccount: (r.CashAccount || '').trim(), cashBank: (r.CashBank || '').trim() };
+      if (pam) map[pam] = { bank: (r.Bank || '').trim(), bankName: (r.BankName || '').trim(), custodyAccount: (r.CustodyAccount || '').trim(), cashBank: (r.CashBank || '').trim() };
     });
     return map;
   }
@@ -582,6 +584,18 @@
     const canBuild = Boolean(tranche && weights.length);
     if (canBuild) plan.steps.forEach(step => allocateStep(step, weights));
     const messages = canBuild ? planMessages(plan, { effectiveDate, tranche, weights, accounts: ctx.accounts }) : [];
+    if (canBuild) {
+      const per = (type, key) => {
+        const totals = {};
+        messages.filter(m => m.level === 'PORTFOLIO' && m.type === type).forEach(m => { totals[m.pamPortfolio] = (totals[m.pamPortfolio] || 0) + m.unitsExchanged; });
+        Object.entries(totals).forEach(([p, units]) => {
+          const b = allocationBasis.find(x => x.pamPortfolio === p);
+          if (b && units > b[key]) exception(`${p} would ${type === 'PAYDOWN' ? 'redeem' : 'draw'} ${money(units)} but holds ${money(b[key])} ${key} in PAM.`);
+        });
+      };
+      per('PAYDOWN', 'funded');
+      per('DRAW', 'unfunded');
+    }
     if (canBuild && messages.some(m => m.level === 'PORTFOLIO' && !m.manual)) {
       const noBank = weights.map(w => w.key).filter(p => !(ctx.accounts[p] && ctx.accounts[p].bank && ctx.accounts[p].custodyAccount));
       if (noBank.length) exception(`No bank or custody account for ${noBank.join(', ')} in the portfolio map. PAM's portfolio messages need them.`);
@@ -592,7 +606,7 @@
       v.warnings.forEach(w => info(`Contract create for ${input.contract_id}: ${w}`));
     }));
     if (messages.some(m => m.manual && m.level === 'PORTFOLIO')) {
-      info('Book the portfolio paydown, draw or capitalization transactions in PAM after loading the file. Their message format hasn\'t been added yet.');
+      info('Book the portfolio capitalized interest transactions in PAM after loading the file. Their message format hasn\'t been added yet.');
     }
     const lines = plan.steps.flatMap(step => step.lines);
 
@@ -802,7 +816,21 @@
             if (units) out.push({ ...base, level: 'PORTFOLIO', pamPortfolio: w.key, account: accounts[w.key] || {}, contractId, unitsExchanged: units, allocs });
           });
         }
+      } else if (step.action === 'PAYDOWN') {
+        // TaContractRedemption redeems one contract per message.
+        step.lines.forEach(l => weights.forEach(w => {
+          const units = l.allocation[w.key];
+          if (units) out.push({ ...base, level: 'PORTFOLIO', pamPortfolio: w.key, account: accounts[w.key] || {}, contractId: l.fromId, unitsExchanged: units, allocs: [] });
+        }));
+      } else if (step.action === 'DRAW') {
+        // TaDrawDown: one message per portfolio, allocated to the contracts drawn into.
+        weights.forEach(w => {
+          const allocs = step.lines.map(l => ({ contractId: l.toId, units: l.allocation[w.key] })).filter(a => a.units !== 0);
+          const units = allocs.reduce((t, a) => t + a.units, 0);
+          if (units) out.push({ ...base, level: 'PORTFOLIO', pamPortfolio: w.key, account: accounts[w.key] || {}, contractId: '', unitsExchanged: units, allocs });
+        });
       } else {
+        // Capitalized interest: no PAM message format yet, so it stays a manual step.
         step.lines.forEach(l => weights.forEach(w => {
           const units = l.allocation[w.key];
           if (units) out.push({ ...base, level: 'PORTFOLIO', manual: true, pamPortfolio: w.key, contractId: l.fromId || l.toId, unitsExchanged: units, allocs: [] });
@@ -999,9 +1027,22 @@
         node('BANKLOANACTIONCONTRACTALLOC', ...m.allocs.map(a =>
           node('BANKLOANACTIONCONTRACTALLOCREC', node('ContractSecID', PAM.contractIdType, a.contractId), pamUnits(a.units)))));
     }
-    const bnk = node('BNK', m.account.bank, m.account.custodyAccount, m.account.cashAccount, node('CASHBANK', m.account.cashBank));
+    const bnk = node('BNK', m.account.bank, m.account.bankName, m.account.custodyAccount, node('CASHBANK', m.account.cashBank));
     const alloc = node('CONTRACTALLOC', 'ADD', ...m.allocs.map(a =>
-      node('CONTRACTALLOCREC', node('SecID', PAM.contractIdType, a.contractId), pamUnits(a.units))));
+      node('CONTRACTALLOCREC', node('SecID', a.idType || PAM.contractIdType, a.contractId), pamUnits(a.units))));
+    const units = pamUnits(m.unitsExchanged);
+    if (m.type === 'PAYDOWN') {
+      // Per the TACONTRACTREDEMPTION minimum message spec: Portfolio comes before BNK(); accrued interest 0.
+      return node('TaContractRedemption', 'ADD', null, fac, node('CONTRACTSECID', PAM.contractIdType, m.contractId),
+        date, m.pamPortfolio, bnk, units, units, '0.000000');
+    }
+    if (m.type === 'DRAW') {
+      // Per the TADRAWDOWN minimum message spec: trade and settle date both the effective date,
+      // blank broker, BNK() before Portfolio, the unfunded taken down equals the draw.
+      return node('TaDrawDown', 'ADD', null, fac, date, date, null, bnk, m.pamPortfolio, units, units,
+        node('BLUNFUNDED', node('UNFUNDEDUNITS', units), node('BLUNFUNDEDTKDN', PAM.unfundedTakedown)),
+        alloc, node('DELAYEDDELIVERYDATE', date));
+    }
     const ccidNode = node('CCID', ccid, date, 0);
     // The transaction number (third argument) is blank: PAM assigns it on ADD.
     if (m.type === 'CONTRACT_COMBINE') {
@@ -1028,7 +1069,7 @@
       const c = m.contract;
       return `Create contract ${m.contractId} on ${m.facilityId}: ${c.rateType} ${c.baseRate} ${c.tenor} + ${c.marginBps} bps, floor ${c.floorPct}, ${c.interestType}, ${c.payFreq} pay, ${c.resetFreq} reset, ${c.dayCount}, ${c.startDate} to ${c.endDate}.`;
     }
-    const verb = { PAYDOWN: 'Paydown of', DRAW: 'Draw of', CAPITALIZE: 'Capitalized interest of' }[m.type] || m.type;
+    const verb = { CAPITALIZE: 'Capitalized interest of' }[m.type] || m.type;
     return `${verb} ${formatMoney(m.unitsExchanged)} on contract ${m.contractId} for ${m.pamPortfolio} (${m.facilityId}), effective ${m.effectiveDate}.`;
   }
 
@@ -1037,14 +1078,19 @@
    * left blank because PAM assigns it on ADD; each portfolio message gets a
    * CCID of batch-sequence.
    */
-  function buildPamFile(events, { batchId }) {
+  function buildPamFile(events, { batchId, today = '' }) {
     const seen = new Map();
     const errors = [];
+    const warnings = [];
+    if (today) {
+      events.forEach(ev => ev.messages.filter(m => m.level === 'PORTFOLIO' && (m.type === 'PAYDOWN' || m.type === 'DRAW') && m.effectiveDate > today)
+        .slice(0, 1).forEach(m => warnings.push(`${ev.assetName}: ${m.type === 'PAYDOWN' ? 'redemption' : 'drawdown'} dated ${m.effectiveDate} is after today (${today}); PAM rejects future-dated ${m.type === 'PAYDOWN' ? 'redemptions' : 'drawdowns'}.`)));
+    }
     events.forEach(ev => ev.messages.filter(m => m.level === 'SMF').forEach(m => m.contractIds.forEach(id => {
       if (seen.has(id)) errors.push(`Contract ${id} is created by both ${seen.get(id)} and ${ev.key}.`);
       else seen.set(id, ev.key);
     })));
-    if (errors.length) return { text: '', messageCount: 0, before: [], after: [], errors };
+    if (errors.length) return { text: '', messageCount: 0, before: [], after: [], errors, warnings };
     let seq = 0;
     const blocks = [];
     const before = [];
@@ -1056,7 +1102,7 @@
       blocks.push(pamMessageText(m, opts));
     }));
     // One message per line, newline-terminated.
-    return { text: blocks.map(b => `${b}\n`).join(''), messageCount: blocks.length, before, after, errors };
+    return { text: blocks.map(b => `${b}\n`).join(''), messageCount: blocks.length, before, after, errors, warnings };
   }
 
   // ---------------------------------------------------------------- unfunded fees

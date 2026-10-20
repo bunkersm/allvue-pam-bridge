@@ -6,7 +6,7 @@
   'use strict';
   const E = window.Engine;
   const S = window.SampleData;
-  const STORE_KEY = 'loan-event-bridge:v6';
+  const STORE_KEY = 'loan-event-bridge:v7';
 
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const money = E.formatMoney;
@@ -54,7 +54,7 @@
   const INPUTS = [
     { key: 'prior', title: 'AllVue contracts, prior day', layout: 'allvue', desc: 'Contract-level export from the previous business day. Detection compares it with the current day.' },
     { key: 'current', title: 'AllVue contracts, current day', layout: 'allvue', desc: 'Same export for the day you are processing. Its AsOfDate becomes the run date.' },
-    { key: 'portfolioMap', title: 'Portfolio map', layout: 'portfolioMap', desc: 'One row per PAM portfolio fed by an AllVue portfolio, with the bank and custody details used in its PAM messages.' },
+    { key: 'portfolioMap', title: 'Portfolio map', layout: 'portfolioMap', desc: 'One row per PAM portfolio fed by an AllVue portfolio, with the BNK() details used in its PAM messages: bank, bank name, custody account and cash bank.' },
     { key: 'trancheMap', title: 'Tranche map', layout: 'trancheMap', desc: 'Links each AllVue asset to its PAM facility security ID, with the maturity date and PAM currency code used in contract creates and splits.' },
     { key: 'pamPositions', title: 'PAM holdings', layout: 'pamPositions', desc: 'Funded and unfunded position per PAM portfolio and tranche, as of the same date as the AllVue prior snapshot. Used for tie-out and allocation.' },
     { key: 'lineage', title: 'Contract lineage', layout: 'lineage', desc: 'Which PAM contract each live AllVue contract represents.' },
@@ -318,7 +318,9 @@
     let rows = [];
     if (isFee) rows = E.buildBatchRows(items, id);
     else {
-      file = E.buildPamFile(items, { batchId: id });
+      const d = new Date();
+      const today = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      file = E.buildPamFile(items, { batchId: id, today });
       if (file.errors.length) { toast(`File not created: ${file.errors.join(' ')}`); return; }
     }
     const count = isFee ? rows.length : file.messageCount;
@@ -330,6 +332,7 @@
       format: isFee ? 'csv' : 'pam',
       text: file ? file.text : null,
       before: file ? file.before : [],
+      warnings: file ? file.warnings : [],
       after: file ? file.after : [],
       messageCount: count,
       fileName,
@@ -578,7 +581,7 @@
   function messageTable(ev) {
     if (!ev.messages.length) return '<p class="muted">No PAM messages for this event.</p>';
     const levelLabel = { SMF: 'Create contract', GLOBAL: 'Global action', PORTFOLIO: 'Portfolio transaction' };
-    const typeLabel = { CONTRACT_SPLIT: 'contract split', CONTRACT_COMBINE: 'contract combine', PAYDOWN: 'paydown', DRAW: 'draw', CAPITALIZE: 'interest capitalization', CONTRACT_CREATE: '' };
+    const typeLabel = { CONTRACT_SPLIT: 'contract split', CONTRACT_COMBINE: 'contract combine', PAYDOWN: 'contract redemption', DRAW: 'drawdown', CAPITALIZE: 'interest capitalization', CONTRACT_CREATE: '' };
     const before = ev.messages.filter(m => m.manual && m.level === 'SMF');
     const after = ev.messages.filter(m => m.manual && m.level !== 'SMF');
     const blocks = fileMsgs(ev).map(m => `<div class="stack">
@@ -843,9 +846,10 @@
           <button class="btn" data-action="downloadBatch" data-batch="${esc(b.id)}">Download ${b.format === 'pam' ? '.txt' : '.csv'}</button>
           <span class="small muted">Download works when the app runs from your computer. In the hosted preview, use Copy.</span>
         </div>
+        ${(b.warnings || []).length ? `<ul class="flags">${b.warnings.map(w => `<li class="flag review"><b>Check before loading.</b>${esc(w)}</li>`).join('')}</ul>` : ''}
         ${checklist('Before loading: create these contracts in PAM', b.before)}
         <pre class="file" id="file-${esc(b.id)}">${esc(csv)}</pre>
-        ${checklist('After loading: book these portfolio transactions in PAM', b.after)}
+        ${checklist('After loading: book these capitalized interest transactions in PAM', b.after)}
         <h3>Import result</h3>
         <div class="table-wrap"><table>
           <thead><tr><th>${b.kind === 'fee' ? 'Fee' : 'Event'}</th><th class="num">Msgs</th><th>Result</th><th>PAM import browser error</th></tr></thead>
@@ -900,7 +904,7 @@
             <li>1 → many is a <b>split</b>, many → 1 is a <b>combine</b>, many → many is a <b>complex restructure</b>. New contracts with nothing expiring are a <b>draw</b>.</li>
             <li>A lower funded total is a <b>paydown</b>; a higher one is a <b>draw</b>, or <b>capitalized interest</b> when the contract's interest type is Capitalize or Partial. These are booked after any split or combine.</li>
             <li>PAM message order for each event: <b>create</b> new contracts (security master), then for each step one <b>BANKLOANACTION</b> global action with signed global units per contract, then one <b>TaCONTRACTSPLIT</b> or <b>TaCONTRACTCOMBINE</b> per PAM portfolio. A terms change is a new contract plus a 1:1 split; many → many is a combine then a split. New contracts take the AllVue contract ID.</li>
-            <li>New contracts are created with one <b>SMFBANKLOANTRANCHE</b> UPDATE per event (minimal contract add), validated before it goes in the file. Portfolio paydown, draw and capitalization messages are listed as manual steps until their PAM formats are added.</li>
+            <li>New contracts are created with one <b>SMFBANKLOANTRANCHE</b> UPDATE per event (minimal contract add), validated before it goes in the file. Paydowns are <b>TaContractRedemption</b> (one per contract per portfolio) and draws are <b>TaDrawDown</b> (one per portfolio, allocated to the contracts drawn into). No fund may redeem more than its funded holding or draw more than its unfunded. Capitalized interest is a manual step until its PAM format is added.</li>
             <li><b>Dates</b>: PAM holdings must be as of the same date as the AllVue prior snapshot (end of the previous business day), and the AllVue current snapshot must be later. Otherwise detection stops.</li>
             <li><b>Trades</b> are booked in PAM by the trade feed. A position change with no change in the facility's global amount is a trade: nothing is sent. A new position (not in the prior snapshot) is a <b>new purchase</b>: nothing is sent, but an initial long or short first period goes to review. A trade on the same day as a split, combine or terms change goes to review.</li>
             <li>A change that isn't your share of the global change goes to review.</li>
