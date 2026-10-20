@@ -32,10 +32,11 @@ test('allocation always adds back to the amount to the cent', () => {
 test('sample month-end produces the expected routes', () => {
   const events = detectSample();
   const count = r => events.filter(e => e.route === r).length;
-  assert.equal(events.length, 26);
+  assert.equal(events.length, 27);
   assert.equal(count('auto'), 13);
-  assert.equal(count('review'), 10);
-  assert.equal(count('exception'), 3);
+  assert.equal(count('review'), 11);
+  assert.equal(count('exception'), 2);
+  assert.equal(count('trade'), 1);
 });
 
 test('clean rollover is auto and sends nothing', () => {
@@ -130,10 +131,72 @@ test('portfolio without bank details is an exception', () => {
   assert.equal(byAsset(events, 'A1005').route, 'exception');
 });
 
-test('position change with no global change is a trade, not a paydown', () => {
+test('position change with no global change is a trade for the trade feed', () => {
   const ev = byAsset(detectSample(), 'A1023', 'CLO-MASTER');
-  assert.equal(ev.route, 'exception');
-  assert.ok(ev.flags.some(f => /looks like a sale/.test(f.text)));
+  assert.equal(ev.route, 'trade');
+  assert.equal(ev.type, 'TRADE');
+  assert.equal(ev.messages.length, 0, 'nothing sent: the trade feed books it');
+  assert.deepEqual(ev.legs, []);
+  assert.equal(ev.lineageUpdates.length, 1, 'the roll still carries the PAM contract forward');
+  assert.ok(ev.lineageUpdates[0].pamContractId.startsWith('PC-'));
+});
+
+test('new purchase is left to the trade feed and its initial long is flagged', () => {
+  const ev = byAsset(detectSample(), 'A1035');
+  assert.equal(ev.type, 'NEW_POSITION');
+  assert.equal(ev.route, 'review');
+  assert.equal(ev.messages.length, 0);
+  const flag = ev.flags.find(f => /Initial long/.test(f.text));
+  assert.ok(flag);
+  assert.match(flag.text, /46 days/);
+  assert.match(flag.text, /first interest payment on 2026-11-15; AllVue's first payment is 2026-12-15/);
+  assert.ok(!ev.flags.some(f => f.level === 'exception'));
+});
+
+test('new purchase with a regular first period goes straight to the trade feed', () => {
+  const events = detectSample(d => {
+    d.current.filter(r => r.AssetID === 'A1035').forEach(r => { r.EndDate = '2026-11-30'; });
+  });
+  assert.equal(byAsset(events, 'A1035').route, 'trade');
+});
+
+test('a trade on the same day as a restructure goes to review without a paydown', () => {
+  const events = detectSample(d => {
+    // Granite Peak splits 15,000,000 into 9,000,000 + 6,000,000; also sell 1,000,000 out of the 3M piece.
+    const row = d.current.find(r => r.AssetID === 'A1007' && r.Tenor === '3M');
+    row.Amount = '5000000.00';
+    d.current.filter(r => r.AssetID === 'A1007').forEach(r => { r.Commitment = '14000000.00'; });
+  });
+  const ev = byAsset(events, 'A1007');
+  assert.equal(ev.type, 'SPLIT');
+  assert.equal(ev.route, 'review');
+  assert.ok(ev.isTrade);
+  assert.deepEqual(ev.legs, []);
+  assert.ok(ev.flags.some(f => /same day as this restructure/.test(f.text)));
+  assert.ok(!ev.messages.some(m => m.type === 'PAYDOWN'));
+});
+
+test('first scheduled pay date steps back one tenor at a time', () => {
+  assert.equal(E.firstScheduledPayDate({ tenor: '1M', startDate: '2026-10-30', endDate: '2026-12-15' }), '2026-11-15');
+  assert.equal(E.firstScheduledPayDate({ tenor: '1M', startDate: '2026-10-15', endDate: '2026-11-30' }), '2026-10-30');
+  assert.equal(E.firstScheduledPayDate({ tenor: '3M', startDate: '2026-09-01', endDate: '2027-01-29' }), '2026-10-29');
+  assert.equal(E.firstScheduledPayDate({ tenor: '1M', startDate: '2026-10-30', endDate: '2026-11-30' }), '2026-11-30');
+});
+
+test('run dates: PAM must match the AllVue prior date and current must be later', () => {
+  const d = SampleData.build();
+  const n = () => ({ prior: E.normalizeAllVue(d.prior), current: E.normalizeAllVue(d.current), pamPositions: E.normalizePamPositions(d.pamPositions) });
+  assert.deepEqual(E.checkRunDates(n()).errors, []);
+  d.pamPositions.forEach(r => { r.AsOfDate = '2026-10-30'; });
+  assert.ok(E.checkRunDates(n()).errors.some(e => /must be the same date/.test(e)));
+  d.pamPositions.forEach(r => { r.AsOfDate = '2026-10-29'; });
+  d.current.forEach(r => { r.AsOfDate = '2026-10-29'; });
+  assert.ok(E.checkRunDates(n()).errors.some(e => /must be later/.test(e)));
+  d.current.forEach(r => { r.AsOfDate = '2026-11-05'; });
+  assert.deepEqual(E.checkRunDates(n()).errors, []);
+  assert.equal(E.checkRunDates(n()).warnings.length, 1);
+  d.current[0].AsOfDate = '2026-11-06';
+  assert.ok(E.checkRunDates(n()).errors.some(e => /more than one AsOfDate/.test(e)));
 });
 
 test('increase on a capitalizing contract is PIK interest, not a term loan draw', () => {

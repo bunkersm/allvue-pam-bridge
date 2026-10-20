@@ -17,6 +17,8 @@
   --bad-soft: #fbe3e0;
   --violet: #5a48ad;
   --violet-soft: #ebe8f8;
+  --teal: #0b6e6e;
+  --teal-soft: #dcf1ef;
   --changed: #fff3c4;
   --changed-ink: #5c4300;
   --shadow: 0 10px 40px rgba(16, 28, 44, 0.18);
@@ -29,7 +31,7 @@
     --bg: #0f141a; --surface: #161d25; --surface-2: #1d2630; --ink: #e3e8ee; --muted: #98a4b2; --line: #2b3642;
     --accent: #72a9d6; --accent-ink: #0c1620; --accent-soft: #1b3145;
     --ok: #63c28f; --ok-soft: #15302a; --warn: #e0b04c; --warn-soft: #32280f; --bad: #f08a80; --bad-soft: #3a1d1a;
-    --violet: #a99cf0; --violet-soft: #252140; --changed: #3d3310; --changed-ink: #f2d98a;
+    --violet: #a99cf0; --violet-soft: #252140; --teal: #5ccfc4; --teal-soft: #123331; --changed: #3d3310; --changed-ink: #f2d98a;
     --shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
     color-scheme: dark;
   }
@@ -38,7 +40,7 @@
   --bg: #0f141a; --surface: #161d25; --surface-2: #1d2630; --ink: #e3e8ee; --muted: #98a4b2; --line: #2b3642;
   --accent: #72a9d6; --accent-ink: #0c1620; --accent-soft: #1b3145;
   --ok: #63c28f; --ok-soft: #15302a; --warn: #e0b04c; --warn-soft: #32280f; --bad: #f08a80; --bad-soft: #3a1d1a;
-  --violet: #a99cf0; --violet-soft: #252140; --changed: #3d3310; --changed-ink: #f2d98a;
+  --violet: #a99cf0; --violet-soft: #252140; --teal: #5ccfc4; --teal-soft: #123331; --changed: #3d3310; --changed-ink: #f2d98a;
   --shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
   color-scheme: dark;
 }
@@ -132,6 +134,7 @@ main { max-width: 1320px; margin: 0 auto; padding-block: 20px 60px; padding-inli
 .tile.t-approved { --tile: var(--accent); }
 .tile.t-batch { --tile: var(--violet); }
 .tile.t-done { --tile: var(--muted); }
+.tile.t-trade { --tile: var(--teal); }
 
 /* ---------- tables */
 .table-wrap { overflow-x: auto; border: 1px solid var(--line); border-radius: var(--radius); background: var(--surface); }
@@ -158,6 +161,7 @@ td.changed { background: var(--changed); color: var(--changed-ink); font-weight:
 .chip.c-auto, .chip.c-loaded { background: var(--ok-soft); color: var(--ok); }
 .chip.c-approved { background: var(--accent-soft); color: var(--accent); }
 .chip.c-batch { background: var(--violet-soft); color: var(--violet); }
+.chip.c-trade { background: var(--teal-soft); color: var(--teal); }
 .chip.c-done { background: var(--surface-2); color: var(--muted); }
 .tag {
   display: inline-block; font: 500 11px var(--font-data); padding: 1px 6px; border-radius: 4px;

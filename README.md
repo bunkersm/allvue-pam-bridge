@@ -16,6 +16,22 @@ npm test
 
 ## How it works
 
+### Dates
+
+Each morning run processes one **business date** D (the previous business day):
+
+| Input | As of |
+|---|---|
+| AllVue prior snapshot | End of the business day before D |
+| PAM holdings | Same date as the AllVue prior snapshot |
+| AllVue current snapshot | End of D |
+
+Example: run on Tuesday 10/20 → business date Monday 10/19; AllVue prior and PAM holdings as of Friday 10/16. Detection stops if PAM's `AsOfDate` doesn't match the AllVue prior date or the current snapshot isn't later, and warns if the snapshots are more than 4 days apart.
+
+### Trades
+
+Buys, sells and new purchases are booked in PAM by the **trade feed**, not by this app. A position change with no change in the facility's global amount is a trade, and nothing is sent. A position that wasn't in the prior snapshot is a **new purchase**: nothing is sent, but an initial long or short first period goes to review with PAM's expected first pay date next to AllVue's. A trade on the same day as a split, combine or terms change goes to review.
+
 1. **Detect.** For each AllVue portfolio and asset, compare the prior-day and current-day contract exports. Contracts that are gone are *expiring*; contracts that appeared are *new*; contracts with the same ID but a different amount or terms are *amended*.
 2. **Classify.**
 
@@ -61,7 +77,7 @@ Load these on **Setup and data** as CSV. Header names must match.
 | AllVue contracts (prior and current day) | `AsOfDate, AllVuePortfolio, AssetID, AssetName, FacilityType, ContractID, ContractType, StartDate, EndDate, Amount, GlobalAmount, Commitment, RateType, InterestType, BaseRate, Tenor, MarginBps, FloorPct, PayFreq, ResetFreq, DayCount` |
 | Portfolio map | `AllVuePortfolio, PAMPortfolio, Bank, CustodyAccount, CashAccount, CashBank` |
 | Tranche map | `AssetID, PAMTrancheID, FacilityType, MaturityDate, PAMCurrency` |
-| PAM positions | `PAMPortfolio, PAMTrancheID, Funded, Unfunded` |
+| PAM holdings | `AsOfDate, PAMPortfolio, PAMTrancheID, Funded, Unfunded` |
 | Contract lineage | `AllVueContractID, PAMContractID` |
 | AllVue unfunded fee export | `AllVuePortfolio, AssetID, AssetName, FacilityType, FeeType, PeriodStart, PeriodEnd, FeeRateBps, AverageUnfunded, DayCount, Amount, AllVueTransactionID` |
 

@@ -31,7 +31,9 @@
     ROLLOVER: 'Rollover', CONTRACT_CHANGE: 'Contract change', SPLIT: 'Contract split',
     COMBINE: 'Contract combine', COMPLEX: 'Complex restructure', PAYDOWN: 'Paydown',
     REPAYMENT: 'Repayment', DRAW: 'Draw', COMMITMENT_CHANGE: 'Commitment change', CAPITALIZE: 'Capitalized interest',
+    TRADE: 'Trade', NEW_POSITION: 'New purchase',
   };
+  const TENOR_MONTHS = { '1M': 1, '3M': 3, '6M': 6, '12M': 12 };
 
   // Interest types whose interest is added to principal (PIK) rather than paid in cash.
   const CAPITALIZING = new Set(['CAPITALIZE', 'CAPITALIZED', 'PIK', 'PARTIAL', 'PARTIAL PIK']);
@@ -44,7 +46,7 @@
       'PayFreq', 'ResetFreq', 'DayCount'],
     trancheMap: ['AssetID', 'PAMTrancheID', 'FacilityType', 'MaturityDate', 'PAMCurrency'],
     portfolioMap: ['AllVuePortfolio', 'PAMPortfolio', 'Bank', 'CustodyAccount', 'CashAccount', 'CashBank'],
-    pamPositions: ['PAMPortfolio', 'PAMTrancheID', 'Funded', 'Unfunded'],
+    pamPositions: ['AsOfDate', 'PAMPortfolio', 'PAMTrancheID', 'Funded', 'Unfunded'],
     lineage: ['AllVueContractID', 'PAMContractID'],
 
     fees: ['AllVuePortfolio', 'AssetID', 'AssetName', 'FacilityType', 'FeeType', 'PeriodStart', 'PeriodEnd',
@@ -222,6 +224,7 @@
 
   function normalizePamPositions(rows) {
     return rows.map(r => ({
+      asOfDate: normalizeDate(r.AsOfDate),
       pamPortfolio: r.PAMPortfolio.trim(),
       pamTrancheId: r.PAMTrancheID.trim(),
       funded: toCents(r.Funded),
@@ -273,7 +276,60 @@
       .map(f => ({ field: f, label: TERM_LABELS[f], from: a[f], to: b[f] }));
   }
 
-  const ROUTE_ORDER = { exception: 0, review: 1, auto: 2 };
+  const ROUTE_ORDER = { exception: 0, review: 1, auto: 2, trade: 3 };
+
+  /**
+   * Checks the run's dates. The PAM holdings must be as of the same date as the
+   * AllVue prior snapshot (both end of the previous business day), and the
+   * AllVue current snapshot must be later. Errors stop the run.
+   */
+  function checkRunDates({ prior, current, pamPositions }) {
+    const errors = [];
+    const warnings = [];
+    const one = (rows, name) => {
+      const dates = [...new Set(rows.map(r => r.asOfDate).filter(Boolean))].sort();
+      if (rows.length && !dates.length) errors.push(`The ${name} has no AsOfDate.`);
+      if (dates.length > 1) errors.push(`The ${name} has more than one AsOfDate (${dates.join(', ')}).`);
+      return dates[dates.length - 1] || '';
+    };
+    const priorDate = one(prior, 'AllVue prior snapshot');
+    const currentDate = one(current, 'AllVue current snapshot');
+    const pamDate = one(pamPositions, 'PAM holdings file');
+    if (priorDate && currentDate && currentDate <= priorDate) {
+      errors.push(`The AllVue current snapshot (${currentDate}) must be later than the prior snapshot (${priorDate}).`);
+    }
+    if (pamDate && priorDate && pamDate !== priorDate) {
+      errors.push(`PAM holdings are as of ${pamDate} but the AllVue prior snapshot is as of ${priorDate}. They must be the same date.`);
+    }
+    if (priorDate && currentDate && daysBetween(priorDate, currentDate) > 4) {
+      warnings.push(`${daysBetween(priorDate, currentDate)} days between the AllVue snapshots. Check that no business day was skipped.`);
+    }
+    return { priorDate, currentDate, pamDate, errors, warnings };
+  }
+
+  /** Same day of month (clamped to month end) a number of months away. */
+  function shiftMonths(isoDate, months, day) {
+    const y = Number(isoDate.slice(0, 4));
+    const m = Number(isoDate.slice(5, 7)) - 1 + months;
+    const year = y + Math.floor(m / 12);
+    const month = ((m % 12) + 12) % 12;
+    const last = new Date(Date.UTC(year, month + 1, 0)).getUTCDate();
+    return `${year}-${String(month + 1).padStart(2, '0')}-${String(Math.min(day, last)).padStart(2, '0')}`;
+  }
+
+  /**
+   * The first payment date a regular schedule would give after the start date:
+   * step back from the contract's end date one tenor at a time while still after
+   * the start. Equal to the end date for a regular or short first period.
+   */
+  function firstScheduledPayDate(c) {
+    const months = TENOR_MONTHS[c.tenor];
+    if (!months) return c.endDate;
+    const day = Number(c.endDate.slice(8, 10));
+    let pay = c.endDate;
+    for (let back = shiftMonths(pay, -months, day); back > c.startDate; back = shiftMonths(back, -months, day)) pay = back;
+    return pay;
+  }
 
   /**
    * Compares the prior and current AllVue contract snapshots for each AllVue
@@ -335,6 +391,20 @@
     const fundedAfter = sum(currentFunded);
     const fundedDelta = fundedAfter - fundedBefore;
 
+    // ---- trades vs loan events. Trades (buys, sells, new purchases) are booked in
+    // PAM by the trade feed. A position change with no change in the facility's
+    // global amount is a trade; this app only books what the loan itself did.
+    const gsum = rows => rows.reduce((t, r) => t + r.globalAmount, 0);
+    const globalBefore = gsum(priorFunded);
+    const globalAfter = gsum(currentFunded);
+    const globalDelta = globalAfter - globalBefore;
+    const missingGlobal = [...priorFunded, ...currentFunded].filter(c => c.amount !== 0 && c.globalAmount <= 0);
+    const isNew = !g.prior.length && g.current.length > 0;
+    const isTrade = !isNew && !missingGlobal.length && globalBefore > 0 && g.current.length > 0 && fundedDelta !== 0 && globalDelta === 0;
+    // The change this app books: none of a trade's change.
+    const bookedDelta = isTrade ? 0 : fundedDelta;
+    const planAmended = isTrade ? amended.map(a => ({ ...a, amountDelta: 0 })) : amended;
+
     // ---- event type
     let type;
     let rollTermChanges = [];
@@ -351,15 +421,19 @@
     else if (!expired.length) type = 'DRAW';
     else if (!added.length) type = 'REPAYMENT';
     else type = 'COMPLEX';
+    if (isNew) type = 'NEW_POSITION';
+    // A trade with no restructure: nothing for this app to book.
+    const restructured = ['CONTRACT_CHANGE', 'SPLIT', 'COMBINE', 'COMPLEX'].includes(type);
+    if (isTrade && !restructured) type = 'TRADE';
 
     const rollsAtPeriodEnd = expired.length > 0 && added.length > 0;
     // An increase on a contract that capitalizes interest is PIK, not a draw.
-    const capitalizing = fundedDelta > 0
+    const capitalizing = bookedDelta > 0
       && [...expired, ...amended.map(a => a.prev)].some(c => CAPITALIZING.has(c.interestType.toUpperCase()));
     if (capitalizing && type === 'DRAW' && !added.length) type = 'CAPITALIZE';
     const legs = [];
-    if (rollsAtPeriodEnd && fundedDelta < 0) legs.push('PAYDOWN');
-    if (rollsAtPeriodEnd && fundedDelta > 0) legs.push(capitalizing ? 'CAPITALIZE' : 'DRAW');
+    if (rollsAtPeriodEnd && !isNew && bookedDelta < 0) legs.push('PAYDOWN');
+    if (rollsAtPeriodEnd && !isNew && bookedDelta > 0) legs.push(capitalizing ? 'CAPITALIZE' : 'DRAW');
 
     const effectiveDate = added.length
       ? added.map(c => c.startDate).sort()[0]
@@ -385,14 +459,14 @@
     }
     if (capitalizing) {
       review(`Funded amount went up by ${money(fundedDelta)} on a contract that capitalizes interest. Booked as capitalized (PIK) interest; check it against the agent notice.`);
-    } else if (facilityType === 'TL' && fundedDelta > 0) {
+    } else if (facilityType === 'TL' && bookedDelta > 0 && !isNew) {
       exception(`Term loan funded amount went up by ${money(fundedDelta)}. Term loans do not draw, so check for an add-on, an incremental or a trade.`);
     }
-    if (!capitalizing && facilityType !== 'TL' && fundedDelta > unfundedBefore) {
+    if (!capitalizing && !isNew && facilityType !== 'TL' && bookedDelta > unfundedBefore) {
       exception(`Draw of ${money(fundedDelta)} is larger than the prior unfunded amount of ${money(unfundedBefore)}.`);
     }
 
-    if (g.current.length && commitmentAfter !== commitmentBefore) {
+    if (g.current.length && !isNew && !isTrade && commitmentAfter !== commitmentBefore) {
       const reduction = commitmentBefore - commitmentAfter;
       const permanentPaydown = fundedDelta < 0 && reduction === -fundedDelta;
       if (facilityType === 'TL' && (permanentPaydown || (capitalizing && -reduction === fundedDelta))) { /* term loan commitment moves with par */ }
@@ -414,37 +488,44 @@
     added.forEach(c => {
       const days = daysBetween(c.startDate, c.endDate);
       const range = TENOR_DAYS[c.tenor];
-      if (range && (days < range[0] || days > range[1])) {
+      if (!range || (days >= range[0] && days <= range[1])) return;
+      const freq = (c.payFreq || '').toLowerCase();
+      if (isNew && days > range[1]) {
+        review(`Initial long: the first contract ${c.contractId} runs ${days} days (${c.startDate} to ${c.endDate}) on a ${c.tenor} tenor. On its ${freq} schedule PAM will expect the first interest payment on ${firstScheduledPayDate(c)}; AllVue's first payment is ${c.endDate}. Apply the PAM fix for initial long periods.`);
+      } else if (isNew) {
+        review(`Initial short: the first contract ${c.contractId} runs only ${days} days (${c.startDate} to ${c.endDate}) on a ${c.tenor} tenor. Check that PAM accrues the short first period to ${c.endDate}.`);
+      } else {
         review(`New contract ${c.contractId} runs ${days} days (${c.startDate} to ${c.endDate}) on a ${c.tenor} tenor. PAM accrues on the regular schedule, so check for a stub or broken period.`);
       }
     });
+    if (isNew) {
+      info(`New position of ${money(fundedAfter)}. The trade feed books the purchase in PAM; this app sends nothing for it. Link the PAM contract it lands in once the trade has posted.`);
+    }
+    if (isTrade && !restructured) {
+      info(`Your position changed by ${money(fundedDelta)} while the facility's global amount didn't: a ${fundedDelta < 0 ? 'sale' : 'purchase'}. The trade feed books it in PAM; this app sends nothing for it.`);
+    }
+    if (isTrade && restructured) {
+      review(`A ${fundedDelta < 0 ? 'sale' : 'purchase'} of ${money(Math.abs(fundedDelta))} happened on the same day as this restructure. The messages below move the holdings as they were before the trade; the trade feed books the trade separately. Check the amounts once the trade has posted in PAM.`);
+    }
 
     if (type === 'COMPLEX') {
       review(`${expired.length} contracts roll into ${added.length}. Booked as a combine into contract ${added[0].contractId}, then a split out to the others. Check the amounts against the agent notice.`);
     }
     if (type === 'REPAYMENT' && !g.current.length) {
-      review('The position is no longer in the AllVue export. Confirm this is a repayment and not a sale or transfer.');
+      review('The position is no longer in the AllVue export. If it was repaid, approve. If it was sold or transferred, the trade feed books it: reject.');
     }
     if (rollsAtPeriodEnd && amended.length) {
       info('Other contracts on this tranche also changed and are included in this event.');
     }
-    if ((type === 'SPLIT' || type === 'COMPLEX') && fundedDelta !== 0) {
-      info(`The ${fundedDelta < 0 ? 'paydown' : 'draw'} is booked after the restructure, spread across the new contracts in proportion to their size.`);
+    if ((type === 'SPLIT' || type === 'COMPLEX') && bookedDelta !== 0) {
+      info(`The ${bookedDelta < 0 ? 'paydown' : 'draw'} is booked after the restructure, spread across the new contracts in proportion to their size.`);
     }
 
-    // ---- global amounts: needed for PAM's global actions, and they separate real
-    // paydowns and draws from your own trades.
-    const gsum = rows => rows.reduce((t, r) => t + r.globalAmount, 0);
-    const globalBefore = gsum(priorFunded);
-    const globalAfter = gsum(currentFunded);
-    const globalDelta = globalAfter - globalBefore;
-    const missingGlobal = [...priorFunded, ...currentFunded].filter(c => c.amount !== 0 && c.globalAmount <= 0);
+    // ---- global amounts: needed for PAM's global actions.
     if (missingGlobal.length) {
       exception(`No global amount for contract ${[...new Set(missingGlobal.map(c => c.contractId))].join(', ')}. PAM's global action needs it.`);
-    } else if (globalBefore > 0 && g.current.length) {
-      if (fundedDelta !== 0 && globalDelta === 0) {
-        exception(`Your funded position changed by ${money(fundedDelta)} but the global amount did not. That looks like a ${fundedDelta < 0 ? 'sale' : 'purchase'}, not a ${fundedDelta < 0 ? 'paydown' : 'draw'}. Book the trade in PAM instead.`);
-      } else if (globalDelta !== 0) {
+    } else if (globalBefore > 0 && g.current.length && !isTrade) {
+      if (globalDelta !== 0) {
         const expectedDelta = Math.round(globalDelta * fundedBefore / globalBefore);
         if (Math.abs(fundedDelta - expectedDelta) > Math.max(500, Math.abs(expectedDelta) * 0.0001)) {
           review(`Your change of ${money(fundedDelta)} is not your ${(fundedBefore / globalBefore * 100).toFixed(4)}% share of the global change of ${money(globalDelta)} (expected ${money(expectedDelta)}). There may be a trade on the same day; check before booking.`);
@@ -468,7 +549,7 @@
       });
       const pamFunded = allocationBasis.reduce((s, b) => s + b.funded, 0);
       const pamUnfunded = allocationBasis.reduce((s, b) => s + b.unfunded, 0);
-      if (allocationBasis.every(b => b.weight === 0)) {
+      if (allocationBasis.every(b => b.weight === 0) && !isNew) {
         exception(`No PAM positions found in tranche ${tranche.pamTrancheId} for ${pamPortfolios.join(', ')}. A new position needs its trade booked in PAM first.`);
       } else {
         if (pamFunded !== fundedBefore) {
@@ -487,7 +568,9 @@
       const pamId = pamIdOf(c);
       return pamId === c.contractId ? `${c.contractId}-${effectiveDate.replace(/-/g, '')}` : c.contractId;
     };
-    const plan = buildPlan({ type, expired, added, amended, fundedDelta, globalDelta, capitalizing, pamIdOf, newIdOf });
+    // Trades and new purchases are the trade feed's: only the loan's own change is planned.
+    const planType = isNew ? 'NEW_POSITION' : type === 'TRADE' ? (expired.length === 1 && added.length === 1 ? 'ROLLOVER' : 'NONE') : type;
+    const plan = buildPlan({ type: planType, expired, added, amended: planAmended, fundedDelta: bookedDelta, globalDelta: isTrade ? 0 : globalDelta, capitalizing, pamIdOf, newIdOf });
 
     const key = [
       allvuePortfolio, assetId, effectiveDate,
@@ -516,8 +599,10 @@
     const hasException = flags.some(f => f.level === 'exception');
     const hasReview = flags.some(f => f.level === 'review');
     const route = hasException ? 'exception'
-      : type === 'ROLLOVER' && !legs.length && !amended.length && !hasReview ? 'auto'
-        : 'review';
+      : hasReview ? 'review'
+        : (type === 'TRADE' || type === 'NEW_POSITION') ? 'trade'
+          : type === 'ROLLOVER' && !legs.length && !amended.length ? 'auto'
+            : 'review';
 
     // ---- lineage: which PAM contract each new AllVue contract represents
     const lineageUpdates = plan.lineage;
@@ -526,7 +611,8 @@
       key, allvuePortfolio, assetId, assetName, facilityType, effectiveDate,
       type, typeLabel: TYPE_LABELS[type], legs, route, flags,
       expired, added, amended, unchanged, rollTermChanges,
-      totals: { fundedBefore, fundedAfter, fundedDelta, unfundedBefore, unfundedAfter, commitmentBefore, commitmentAfter, globalBefore, globalAfter, globalDelta },
+      totals: { fundedBefore, fundedAfter, fundedDelta, bookedDelta, unfundedBefore, unfundedAfter, commitmentBefore, commitmentAfter, globalBefore, globalAfter, globalDelta },
+      isTrade, isNew,
       pamTrancheId: tranche ? tranche.pamTrancheId : '',
       allocationBasis, creates: plan.creates, steps: plan.steps, lines, messages, lineageUpdates,
     };
@@ -1095,7 +1181,7 @@
     parseCSV, toCSV, missingColumns,
     toCents, fromCents, formatMoney, normalizeDate, daysBetween,
     normalizeAllVue, normalizeTrancheMap, normalizePortfolioMap, normalizePamPositions, normalizeLineage,
-    allocate, detectEvents, buildBatchRows,
+    allocate, detectEvents, buildBatchRows, checkRunDates, firstScheduledPayDate,
     FEE_TOLERANCE, FEE_POSITION_DRIFT, normalizeFees, expectedFee, checkFees,
     PAM, normalizePortfolioAccounts, pamMessageNode, pamMessageText, manualStepText, buildPamFile,
     node, serialize, prettyPrint, assertBalanced, PAM_CONTRACT_DEFAULTS, EXCLUDED_CONTRACT_FIELDS,

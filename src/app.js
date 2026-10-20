@@ -6,7 +6,7 @@
   'use strict';
   const E = window.Engine;
   const S = window.SampleData;
-  const STORE_KEY = 'loan-event-bridge:v5';
+  const STORE_KEY = 'loan-event-bridge:v6';
 
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const money = E.formatMoney;
@@ -16,6 +16,7 @@
   const STATUS = {
     verified: { label: 'Clean, no PAM action', chip: 'c-auto', group: 'auto' },
     ready: { label: 'Clean, ready to approve', chip: 'c-auto', group: 'auto' },
+    trade_feed: { label: 'Booked by trade feed', chip: 'c-trade', group: 'trades' },
     pending: { label: 'Needs review', chip: 'c-review', group: 'review' },
     failed: { label: 'Import failed', chip: 'c-exception', group: 'review' },
     exception: { label: 'Exception', chip: 'c-exception', group: 'exception' },
@@ -27,12 +28,13 @@
     manual: { label: 'Handled outside the app', chip: 'c-done', group: 'done' },
   };
   // Statuses set by the system from the detection route; anything else is a person's decision and survives a re-run.
-  const SYSTEM_STATUSES = new Set(['pending', 'exception', 'ready']);
+  const SYSTEM_STATUSES = new Set(['pending', 'exception', 'ready', 'trade_feed']);
 
   const GROUPS = [
     { id: 'review', label: 'Needs review', desc: 'Approve or reject', cls: 't-review' },
     { id: 'exception', label: 'Exceptions', desc: 'Data or setup to fix', cls: 't-exception' },
     { id: 'auto', label: 'Clean rollovers', desc: 'Verified, nothing to send', cls: 't-auto' },
+    { id: 'trades', label: 'Trades', desc: 'Booked by the trade feed', cls: 't-trade' },
     { id: 'approved', label: 'Approved', desc: 'Waiting for a PAM file', cls: 't-approved' },
     { id: 'batch', label: 'Awaiting import', desc: 'In a PAM file', cls: 't-batch' },
     { id: 'done', label: 'Done', desc: 'Loaded, closed or rejected', cls: 't-done' },
@@ -54,7 +56,7 @@
     { key: 'current', title: 'AllVue contracts, current day', layout: 'allvue', desc: 'Same export for the day you are processing. Its AsOfDate becomes the run date.' },
     { key: 'portfolioMap', title: 'Portfolio map', layout: 'portfolioMap', desc: 'One row per PAM portfolio fed by an AllVue portfolio, with the bank and custody details used in its PAM messages.' },
     { key: 'trancheMap', title: 'Tranche map', layout: 'trancheMap', desc: 'Links each AllVue asset to its PAM facility security ID, with the maturity date and PAM currency code used in contract creates and splits.' },
-    { key: 'pamPositions', title: 'PAM positions', layout: 'pamPositions', desc: 'Funded and unfunded position per PAM portfolio and tranche. Used for tie-out and allocation.' },
+    { key: 'pamPositions', title: 'PAM holdings', layout: 'pamPositions', desc: 'Funded and unfunded position per PAM portfolio and tranche, as of the same date as the AllVue prior snapshot. Used for tie-out and allocation.' },
     { key: 'lineage', title: 'Contract lineage', layout: 'lineage', desc: 'Which PAM contract each live AllVue contract represents.' },
     { key: 'fees', title: 'AllVue unfunded fee export', layout: 'fees', desc: 'Monthly commitment and ticking fees. PeriodEnd is the last accrual day.' },
   ];
@@ -138,10 +140,21 @@
     let events;
     try {
       const i = state.inputs;
+      const prior = E.normalizeAllVue(i.prior);
+      const current = E.normalizeAllVue(i.current);
+      const dates = E.checkRunDates({ prior, current, pamPositions: E.normalizePamPositions(i.pamPositions) });
+      state.dateCheck = dates;
+      if (dates.priorDate) state.priorAsOfDate = dates.priorDate;
+      if (dates.currentDate) state.asOfDate = dates.currentDate;
+      if (dates.errors.length) {
+        log('Detection stopped', '', 'Date check', dates.errors.join(' '));
+        if (!quiet) toast(`Detection didn't run: ${dates.errors.join(' ')}`);
+        return;
+      }
       events = E.detectEvents({
         asOfDate: state.asOfDate,
-        prior: E.normalizeAllVue(i.prior),
-        current: E.normalizeAllVue(i.current),
+        prior,
+        current,
         trancheMap: E.normalizeTrancheMap(i.trancheMap),
         portfolioMap: E.normalizePortfolioMap(i.portfolioMap),
         accounts: E.normalizePortfolioAccounts(i.portfolioMap),
@@ -157,16 +170,16 @@
     events.forEach(ev => {
       const existing = state.status[ev.key];
       if (existing && !SYSTEM_STATUSES.has(existing.status)) { kept++; return; }
-      const status = ev.route === 'auto' ? 'verified' : ev.route === 'exception' ? 'exception' : 'pending';
+      const status = { auto: 'verified', trade: 'trade_feed', exception: 'exception' }[ev.route] || 'pending';
       state.status[ev.key] = { status, at: now(), by: 'Detection' };
-      if (status === 'verified') applyLineage(ev);
+      if (status === 'verified' || status === 'trade_feed') applyLineage(ev);
     });
     state.events = events;
 
-    const counts = { auto: 0, review: 0, exception: 0 };
+    const counts = { auto: 0, review: 0, exception: 0, trade: 0 };
     events.forEach(ev => { counts[ev.route]++; });
     state.lastRun = { at: now(), total: events.length, ...counts };
-    const summary = `${events.length} events: ${counts.auto} clean rollovers, ${counts.review} for review, ${counts.exception} exceptions`;
+    const summary = `${events.length} events: ${counts.auto} clean rollovers, ${counts.trade} trades for the trade feed, ${counts.review} for review, ${counts.exception} exceptions`;
     log('Ran detection', '', `${state.priorAsOfDate} to ${state.asOfDate}`, summary + (kept ? `. ${kept} already decided, kept as they were.` : ''));
     if (!quiet) toast(`Detection finished. ${summary}.`);
   }
@@ -390,6 +403,12 @@
     if (user && document.activeElement !== user) user.value = state.user;
   }
 
+  function dateFlags() {
+    const d = state.dateCheck;
+    if (!d || (!d.errors.length && !d.warnings.length)) return '';
+    return `<ul class="flags">${d.errors.map(e => `<li class="flag exception"><b>Detection stopped.</b>${esc(e)} Load matching files on the Setup tab.</li>`).join('')}${d.warnings.map(w => `<li class="flag review"><b>Check dates.</b>${esc(w)}</li>`).join('')}</ul>`;
+  }
+
   function viewQueue() {
     const counts = groupCounts();
     const run = state.lastRun;
@@ -402,7 +421,9 @@
       <section class="section">
         <div class="panel run">
           <dl>
-            <div><dt>AllVue snapshots</dt><dd class="mono">${esc(state.priorAsOfDate)} → ${esc(state.asOfDate)}</dd></div>
+            <div><dt>Business date</dt><dd class="mono">${esc(state.asOfDate)}</dd></div>
+            <div><dt>AllVue compared</dt><dd class="mono">${esc(state.priorAsOfDate)} → ${esc(state.asOfDate)}</dd></div>
+            <div><dt>PAM holdings as of</dt><dd class="mono">${esc((state.dateCheck && state.dateCheck.pamDate) || 'no date')}</dd></div>
             <div><dt>Source</dt><dd>${esc(state.sourceLabel)}</dd></div>
             <div><dt>Last detection</dt><dd>${run ? `${fmtTime(run.at)}, ${run.total} events` : 'Not run yet'}</dd></div>
           </dl>
@@ -411,6 +432,7 @@
             <button class="btn" data-action="view" data-view="setup">Load files</button>
           </div>
         </div>
+        ${dateFlags()}
         <div class="tiles">${tiles}</div>
       </section>
       <section class="section">
@@ -484,6 +506,10 @@
         return `Mid-period draw of ${money(t.fundedDelta)} on an existing contract.`;
       case 'REPAYMENT':
         return `${ev.expired.map(c).join(', ')} repaid in full (${money(-t.fundedDelta)}).`;
+      case 'TRADE':
+        return `Your position went from ${money(t.fundedBefore)} to ${money(t.fundedAfter)} while the facility's global amount stayed at ${money(t.globalAfter)}: a ${t.fundedDelta < 0 ? 'sale' : 'purchase'} of ${money(Math.abs(t.fundedDelta))}. The trade feed books it in PAM, so this app sends nothing.${ev.expired.length === 1 && ev.added.length === 1 ? ` Contract ${c(ev.expired[0])} also rolled into ${c(ev.added[0])} with the same terms, so the PAM contract carries on.` : ''}`;
+      case 'NEW_POSITION':
+        return `New position of ${money(t.fundedAfter)} in ${ev.added.map(x => `${c(x)} (${esc(x.startDate)} to ${esc(x.endDate)})`).join(', ')}. The trade feed books the purchase in PAM, so this app sends nothing; it checks the first contract's accrual period.`;
       case 'CAPITALIZE':
         return `${money(t.fundedDelta)} of interest capitalized mid-period on ${ev.amended.map(a => c(a.cur)).join(', ')}.`;
       default:
@@ -526,6 +552,7 @@
   }
 
   function allocationTable(ev, basisLabel = 'PAM position before event<br>(funded + unfunded)') {
+    if (ev.isNew) return '<p class="muted">No PAM holdings yet. The trade feed allocates the purchase to funds.</p>';
     if (!ev.allocationBasis.length) return '<p class="muted">No allocation: the asset or portfolio is not mapped to PAM.</p>';
     const basis = ev.allocationBasis;
     const total = basis.reduce((s, b) => s + b.weight, 0);
@@ -597,6 +624,8 @@
       case 'in_batch':
         return `<p class="small">In PAM file <span class="mono">${esc(info.batchId)}</span>, waiting for the import result.</p>
           <div class="row"><button class="btn" data-action="openBatch" data-batch="${esc(info.batchId)}">Open PAM file</button></div>`;
+      case 'trade_feed':
+        return `<p class="small">Booked in PAM by the trade feed. Nothing to send from this app.</p>`;
       case 'verified':
         return `<p class="small">Verified automatically by detection. Amount, terms and period length match, so PAM needs no message. The new AllVue contract now links to the same PAM contract.</p>`;
       default:
@@ -872,7 +901,9 @@
             <li>A lower funded total is a <b>paydown</b>; a higher one is a <b>draw</b>, or <b>capitalized interest</b> when the contract's interest type is Capitalize or Partial. These are booked after any split or combine.</li>
             <li>PAM message order for each event: <b>create</b> new contracts (security master), then for each step one <b>BANKLOANACTION</b> global action with signed global units per contract, then one <b>TaCONTRACTSPLIT</b> or <b>TaCONTRACTCOMBINE</b> per PAM portfolio. A terms change is a new contract plus a 1:1 split; many → many is a combine then a split. New contracts take the AllVue contract ID.</li>
             <li>New contracts are created with one <b>SMFBANKLOANTRANCHE</b> UPDATE per event (minimal contract add), validated before it goes in the file. Portfolio paydown, draw and capitalization messages are listed as manual steps until their PAM formats are added.</li>
-            <li>If your position changes but the global amount does not, it is treated as a <b>trade</b>, not a paydown or draw. A change that isn't your share of the global change goes to review.</li>
+            <li><b>Dates</b>: PAM holdings must be as of the same date as the AllVue prior snapshot (end of the previous business day), and the AllVue current snapshot must be later. Otherwise detection stops.</li>
+            <li><b>Trades</b> are booked in PAM by the trade feed. A position change with no change in the facility's global amount is a trade: nothing is sent. A new position (not in the prior snapshot) is a <b>new purchase</b>: nothing is sent, but an initial long or short first period goes to review. A trade on the same day as a split, combine or terms change goes to review.</li>
+            <li>A change that isn't your share of the global change goes to review.</li>
             <li>A rollover is <b>clean</b> and needs no PAM message when amount and terms match and the new period is regular (${esc(tenors)}).</li>
             <li><b>Exceptions</b>: asset or portfolio not mapped, PAM positions not tying to AllVue before the event, funded plus unfunded not equal to commitment, term loan draws, draws larger than unfunded, missing PAM contract lineage.</li>
             <li>Amounts are allocated to PAM portfolios pro rata on their current position (funded plus unfunded), with largest-remainder rounding.</li>

@@ -9,6 +9,8 @@ Open work and questions for Loan Event Bridge, roughly in priority order.
       Then: splits and combines move each fund's actual units; tie out PAM units to AllVue per contract; check every lineage contract exists in PAM with units;
       flag a fund moving more units than it holds; split fees on the unfunded rows.
       Extract must be as of the prior AllVue snapshot date, on the same settled/traded basis. *Need: which PAM report gives holdings by contract.*
+- [ ] **Confirm PAM can produce holdings as of a past date** (e.g. as of Friday 10/16 when pulled on Tuesday 10/20, after the trade feed has posted Monday's trades).
+- [ ] **Confirm PAM accepts messages effective the previous business day** (every file is back-dated by one business day, three after a weekend).
 - [ ] **PAM code translations.** Confirm every AllVue → PAM code in `docs/pam-code-translations.csv`, then load that file in the app instead of the codes built into `src/engine.js`.
 - [ ] **Real AllVue contract export headers** (with dummy rows) to replace the assumed column names.
 - [ ] **AllVue fee export and PAM fee transaction file layouts** for the fee pilot.
@@ -31,9 +33,10 @@ Open work and questions for Loan Event Bridge, roughly in priority order.
 - [ ] Bank account reference table by PAM portfolio (defaults plus per-facility overrides) instead of bank columns on the portfolio map.
 - [ ] Ask for PAM contract IDs when an event is handled outside the app, so contract lineage stays complete.
 - [ ] Payment date changes (e.g. 15th → 30th): detect and send PAM the new pay day.
-- [ ] Initial long / short first periods on new positions.
+- [x] Initial long / short first periods on new positions are flagged. *Still need: what the PAM fix is, so the app can generate it.*
+- [ ] Link new purchases to the PAM contract the trade feed creates (needs the contract-level holdings extract on the next run).
 - [ ] Base rate adjustments: fold the adjustment into PAM's spread each period; check floors.
-- [ ] Paydown vs trade: use global amounts when one event has both.
+- [x] Trades and new purchases are left to the trade feed (position change with no global change).
 - [ ] Local settings file (`local-config.js`, never committed) for real portfolio and tranche maps on a work computer.
 - [ ] Two-person approval, if required.
 - [ ] Split fees on average daily unfunded once position history is available.

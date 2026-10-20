@@ -118,6 +118,11 @@
     // PIK term loan: a month of interest at 10.50% is added to principal at the roll.
     { id: 'A1034', name: 'Northgate Software PIK TL', port: 'LOANS-MASTER', fac: 'TL', margin: 600, floor: 1, interest: 'Capitalize',
       prior: [prior('1M', 10000000)], current: [next('1M', 10087500)] },
+
+    // New purchase settling 10/30 on a loan that pays on the 15th. The agent skips the
+    // short first period, so the first contract runs 46 days to 12/15 (an initial long).
+    { id: 'A1035', name: 'Harlow Fitness TLB', port: 'LOANS-MASTER', fac: 'TL', margin: 425, floor: 0.5,
+      prior: [], current: [k('1M', 5000000, ['2026-10-30', '2026-12-15'])] },
   ];
 
   // ---- October 2026 unfunded fee export (ACT/360, period end inclusive).
@@ -201,8 +206,8 @@
       const funded = E.allocate(E.toCents(a.prior.reduce((s, c) => s + c.amount, 0)), weights);
       const unfunded = E.allocate(E.toCents(a.unfunded ? a.unfunded[0] : 0), weights);
       if (a.pamBreak) funded[pams[0]] += E.toCents(a.pamBreak);
-      pams.forEach(p => rows.push({
-        PAMPortfolio: p, PAMTrancheID: `PT-${a.id.slice(1)}`,
+      pams.forEach(p => funded[p] + unfunded[p] !== 0 && rows.push({
+        AsOfDate: PRIOR_AS_OF, PAMPortfolio: p, PAMTrancheID: `PT-${a.id.slice(1)}`,
         Funded: E.fromCents(funded[p]), Unfunded: E.fromCents(unfunded[p]),
       }));
     });
