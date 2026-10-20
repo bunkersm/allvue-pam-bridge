@@ -122,6 +122,9 @@ Open items from the spec, to confirm in a PAM test region before production:
 
 ## Next steps
 
+See [TODO.md](TODO.md) for the full list of open work and questions.
+
+
 - Replace the AllVue column mapping with the real AllVue export headers.
 - Replace the PAM layout with the real import message formats, one writer per message type.
 - Add a PAM position extract for next-day reconciliation.

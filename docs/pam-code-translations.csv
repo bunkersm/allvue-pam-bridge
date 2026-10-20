@@ -1,0 +1,32 @@
+PAMField,MessagePosition,AllVueField,AllVueValue,PAMCode,Status,Notes
+loan_type,SMFBANKLOANTRANCHE pos 4,FacilityType,TL,1,From spec,Term
+loan_type,SMFBANKLOANTRANCHE pos 4,FacilityType,RC,2,From spec,Revolver
+loan_type,SMFBANKLOANTRANCHE pos 4,FacilityType,DDTL,3,From spec,Delayed draw
+currency,SMFBANKLOANTRANCHE pos 6,Currency,USD,1,Assumed,Numeric PAM currency code; currently taken from the tranche map PAMCurrency column
+coupon_type,COUPONDATA pos 1,RateType,Floating,V,From spec,
+coupon_type,COUPONDATA pos 1,RateType,Fixed,F,From spec,
+coupon_form,COUPONDATA pos 3,InterestType,Cash,C,From spec,
+coupon_form,COUPONDATA pos 3,InterestType,Capitalize,P,From spec,PIK
+coupon_form,COUPONDATA pos 3,InterestType,Partial,P,Assumed,Partial PIK; minimal message has no PIK split
+coupon_freq,COUPONDATA pos 4,PayFreq,Monthly,M,From spec,
+coupon_freq,COUPONDATA pos 4,PayFreq,Quarterly,Q,From spec,
+coupon_freq,COUPONDATA pos 4,PayFreq,Semi-Annual,S,From spec,
+coupon_freq,COUPONDATA pos 4,PayFreq,Annual,A,From spec,
+coupon_freq,COUPONDATA pos 4,PayFreq,At Maturity,B,From spec,
+day_count,COUPONDATA pos 5,DayCount,ACT/360,D,From spec,
+day_count,COUPONDATA pos 5,DayCount,ACT/365,C,From spec,Act/365 Fixed
+day_count,COUPONDATA pos 5,DayCount,30/360,A,From spec,
+reset_freq,FLOATDATA pos 3,ResetFreq,Monthly,M,Assumed,Same codes as coupon_freq
+reset_freq,FLOATDATA pos 3,ResetFreq,Quarterly,Q,Assumed,Same codes as coupon_freq
+reset_freq,FLOATDATA pos 3,ResetFreq,Semi-Annual,S,Assumed,Same codes as coupon_freq
+base_index,FLOATDATA pos 1,BaseRate + Tenor,SOFR 1M,SR1M,From spec,1M Term SOFR
+base_index,FLOATDATA pos 1,BaseRate + Tenor,SOFR 3M,SR3M,From spec,3M Term SOFR
+base_index,FLOATDATA pos 1,BaseRate + Tenor,SOFR 6M,SR6M,Assumed,
+payment_type,SMFBANKLOANCONTRACTREC pos 4,,(all),B,From spec default,Bullet; S = scheduled
+dated_type,COUPONDATA pos 8,,(all),T,From spec default,Settle date
+float_method,FLOATDATA pos 2,,(all),A,Open item,Meaning to confirm
+pay_date_conv,HOLIDAYS pos 2,,(all),3,Open item,Meaning to confirm
+reset_date_conv,RESETDATECONV,,(all),3,Open item,Meaning to confirm
+holiday_schedule,HOLIDAYS pos 1,,(all),US,From spec default,
+reset_holiday_schedule,RESETHOLIDAYSCHEDULE,,(all),US,From spec default,
+lookback_days,LOCKOUTINFORMATION pos 2,,(all),2,From spec default,
