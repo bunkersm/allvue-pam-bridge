@@ -463,43 +463,34 @@
       pamPositions: input.pamPositions || [],
       lineage: input.lineage || {},
     };
-    const groups = new Map();
+    // One event per facility: a paydown or restructure happens once to the loan,
+    // however many portfolios hold it.
+    const facilities = new Map();
     const add = (rows, side) => rows.forEach(r => {
-      const k = `${r.allvuePortfolio}|${r.assetId}`;
-      if (!groups.has(k)) groups.set(k, { prior: [], current: [] });
-      groups.get(k)[side].push(r);
+      if (!facilities.has(r.assetId)) facilities.set(r.assetId, new Map());
+      const byPortfolio = facilities.get(r.assetId);
+      if (!byPortfolio.has(r.allvuePortfolio)) byPortfolio.set(r.allvuePortfolio, { prior: [], current: [] });
+      byPortfolio.get(r.allvuePortfolio)[side].push(r);
     });
     add(input.prior, 'prior');
     add(input.current, 'current');
 
     const events = [];
-    for (const g of groups.values()) {
-      const ev = classifyGroup(g, ctx);
+    for (const [assetId, byPortfolio] of facilities) {
+      const ev = classifyFacility(assetId, byPortfolio, ctx);
       if (ev) events.push(ev);
     }
-    events.sort((a, b) => ROUTE_ORDER[a.route] - ROUTE_ORDER[b.route]
-      || displayName(a).localeCompare(displayName(b)) || a.allvuePortfolio.localeCompare(b.allvuePortfolio));
+    events.sort((a, b) => ROUTE_ORDER[a.route] - ROUTE_ORDER[b.route] || displayName(a).localeCompare(displayName(b)));
     return events;
   }
 
   /** Issuer and instrument, e.g. "Granite Peak Services Term Loan B". */
   const displayName = ev => [ev.issuerName, ev.assetName].filter(Boolean).join(' ');
 
-  function classifyGroup(g, ctx) {
-    const head = g.current[0] || g.prior[0];
-    const { allvuePortfolio, assetId, assetName, facilityType } = head;
-    const named = k => (g.current.find(r => r[k]) || g.prior.find(r => r[k]) || {})[k] || '';
-    const portfolioName = named('portfolioName');
-    const issuerName = named('issuerName');
-
-    const priorFunded = g.prior.filter(r => r.kind === 'funded');
-    const currentFunded = g.current.filter(r => r.kind === 'funded');
-    const lcAfter = sum(g.current.filter(r => r.kind === 'lc'));
-    const unfundedBefore = sum(g.prior.filter(r => r.unfunded));
-    const unfundedAfter = sum(g.current.filter(r => r.unfunded));
-    const commitmentBefore = g.prior.length ? g.prior[0].commitment : 0;
-    const commitmentAfter = g.current.length ? g.current[0].commitment : 0;
-
+  /** Expiring, new and amended funded contracts between two sets of rows. */
+  function contractChanges(priorRows, currentRows) {
+    const priorFunded = priorRows.filter(r => r.kind === 'funded');
+    const currentFunded = currentRows.filter(r => r.kind === 'funded');
     const priorById = new Map(priorFunded.map(r => [r.contractId, r]));
     const currentIds = new Set(currentFunded.map(r => r.contractId));
     const expired = priorFunded.filter(r => !currentIds.has(r.contractId));
@@ -508,28 +499,113 @@
       const prev = priorById.get(cur.contractId);
       return { prev, cur, amountDelta: cur.amount - prev.amount, diffs: termDiffs(prev, cur) };
     });
-    const amended = continuing.filter(a => a.amountDelta !== 0 || a.diffs.length);
-    const unchanged = continuing.filter(a => a.amountDelta === 0 && !a.diffs.length).map(a => a.cur);
+    return {
+      priorFunded, currentFunded, expired, added,
+      amended: continuing.filter(a => a.amountDelta !== 0 || a.diffs.length),
+      unchanged: continuing.filter(a => a.amountDelta === 0 && !a.diffs.length).map(a => a.cur),
+      fundedBefore: sum(priorFunded),
+      fundedAfter: sum(currentFunded),
+    };
+  }
 
-    if (!expired.length && !added.length && !amended.length && commitmentBefore === commitmentAfter) return null;
+  /**
+   * The facility's rows for one side, summed across AllVue portfolios: one row
+   * per contract with your total position. Global amounts are the facility's, so
+   * they are taken once and must agree across portfolios.
+   */
+  function aggregateSide(byPortfolio, side, problems) {
+    const byId = new Map();
+    let unfunded = 0;
+    let lc = 0;
+    let commitment = 0;
+    let any = false;
+    for (const g of byPortfolio.values()) {
+      const rows = g[side];
+      if (!rows.length) continue;
+      any = true;
+      commitment += rows[0].commitment;
+      rows.forEach(r => {
+        if (r.kind === 'unfunded') unfunded += r.amount;
+        else if (r.kind === 'lc') lc += r.amount;
+        else if (r.kind === 'funded') {
+          const a = byId.get(r.contractId);
+          if (!a) { byId.set(r.contractId, { ...r }); return; }
+          a.amount += r.amount;
+          if (a.globalAmount !== r.globalAmount) problems.add(`the global amount of contract ${r.contractId}`);
+          if (termDiffs(a, r).length || a.startDate !== r.startDate || a.endDate !== r.endDate) problems.add(`the terms or dates of contract ${r.contractId}`);
+        }
+      });
+    }
+    if (!any) return [];
+    const rows = [...byId.values()];
+    if (unfunded) rows.push({ kind: 'unfunded', unfunded: true, amount: unfunded, contractId: '' });
+    if (lc) rows.push({ kind: 'lc', amount: lc, contractId: '' });
+    if (!rows.length) rows.push({ kind: 'unfunded', unfunded: true, amount: 0, contractId: '' });
+    rows.forEach(r => { r.commitment = commitment; });
+    return rows;
+  }
 
-    const fundedBefore = sum(priorFunded);
-    const fundedAfter = sum(currentFunded);
+  function classifyFacility(assetId, byPortfolio, ctx) {
+    const allRows = [...byPortfolio.values()].flatMap(g => [...g.current, ...g.prior]);
+    const head = allRows[0];
+    const { assetName, facilityType } = head;
+    const named = k => (allRows.find(r => r[k]) || {})[k] || '';
+    const issuerName = named('issuerName');
+
+    const problems = new Set();
+    const g = { prior: aggregateSide(byPortfolio, 'prior', problems), current: aggregateSide(byPortfolio, 'current', problems) };
+    const { priorFunded, currentFunded, expired, added, amended, unchanged, fundedBefore, fundedAfter } = contractChanges(g.prior, g.current);
+    const lcAfter = sum(g.current.filter(r => r.kind === 'lc'));
+    const unfundedBefore = sum(g.prior.filter(r => r.unfunded));
+    const unfundedAfter = sum(g.current.filter(r => r.unfunded));
+    const commitmentBefore = g.prior.length ? g.prior[0].commitment : 0;
+    const commitmentAfter = g.current.length ? g.current[0].commitment : 0;
+
+    // Each AllVue portfolio's own holding of the facility.
+    const holdings = [...byPortfolio.entries()].map(([allvuePortfolio, pg]) => {
+      const changes = contractChanges(pg.prior, pg.current);
+      return {
+        allvuePortfolio,
+        portfolioName: (pg.current.find(r => r.portfolioName) || pg.prior.find(r => r.portfolioName) || {}).portfolioName || '',
+        rows: pg,
+        changes,
+        fundedBefore: changes.fundedBefore,
+        fundedAfter: changes.fundedAfter,
+        delta: changes.fundedAfter - changes.fundedBefore,
+        unfundedBefore: sum(pg.prior.filter(r => r.unfunded)),
+        unfundedAfter: sum(pg.current.filter(r => r.unfunded)),
+        isNew: !pg.prior.length && pg.current.length > 0,
+      };
+    }).sort((a, b) => (a.portfolioName || a.allvuePortfolio).localeCompare(b.portfolioName || b.allvuePortfolio));
+    const label = h => h.portfolioName || h.allvuePortfolio;
+
+    const anyChange = expired.length || added.length || amended.length || commitmentBefore !== commitmentAfter
+      || holdings.some(h => h.delta !== 0 || h.unfundedBefore !== h.unfundedAfter);
+    if (!anyChange) return null;
+
     const fundedDelta = fundedAfter - fundedBefore;
 
     // ---- trades vs loan events. Trades (buys, sells, new purchases) are booked in
-    // PAM by the trade feed. A position change with no change in the facility's
-    // global amount is a trade; this app only books what the loan itself did.
+    // PAM by the trade feed. With no change in the facility's global amount, a
+    // portfolio's position change is a trade; this app only books what the loan did.
     const gsum = rows => rows.reduce((t, r) => t + r.globalAmount, 0);
     const globalBefore = gsum(priorFunded);
     const globalAfter = gsum(currentFunded);
     const globalDelta = globalAfter - globalBefore;
     const missingGlobal = [...priorFunded, ...currentFunded].filter(c => c.amount !== 0 && c.globalAmount <= 0);
     const isNew = !g.prior.length && g.current.length > 0;
-    const isTrade = !isNew && !missingGlobal.length && globalBefore > 0 && g.current.length > 0 && fundedDelta !== 0 && globalDelta === 0;
+    holdings.forEach(h => {
+      h.tradeDelta = 0;
+      if (isNew) return;
+      if (h.isNew) h.tradeDelta = h.fundedAfter; // bought into a facility other portfolios already hold
+      else if (!missingGlobal.length && globalBefore > 0 && g.current.length && globalDelta === 0) h.tradeDelta = h.delta;
+      h.bookedDelta = h.delta - h.tradeDelta;
+    });
+    holdings.forEach(h => { if (h.bookedDelta === undefined) h.bookedDelta = h.delta - h.tradeDelta; });
+    const isTrade = holdings.some(h => h.tradeDelta !== 0);
     // The change this app books: none of a trade's change.
-    const bookedDelta = isTrade ? 0 : fundedDelta;
-    const planAmended = isTrade ? amended.map(a => ({ ...a, amountDelta: 0 })) : amended;
+    const bookedDelta = isNew ? fundedDelta : holdings.reduce((t, h) => t + h.bookedDelta, 0);
+    const planAmended = isTrade && globalDelta === 0 ? amended.map(a => ({ ...a, amountDelta: 0 })) : amended;
 
     // ---- event type
     let type;
@@ -548,9 +624,9 @@
     else if (!added.length) type = 'REPAYMENT';
     else type = 'COMPLEX';
     if (isNew) type = 'NEW_POSITION';
-    // A trade with no restructure: nothing for this app to book.
+    // A trade with no restructure and nothing else booked: nothing for this app to do.
     const restructured = ['CONTRACT_CHANGE', 'SPLIT', 'COMBINE', 'COMPLEX'].includes(type);
-    if (isTrade && !restructured) type = 'TRADE';
+    if (isTrade && !restructured && bookedDelta === 0) type = 'TRADE';
 
     const rollsAtPeriodEnd = expired.length > 0 && added.length > 0;
     // An increase on a contract that capitalizes interest is PIK, not a draw.
@@ -573,13 +649,17 @@
     const money = formatMoney;
 
     const tranche = ctx.trancheMap[assetId];
-    const pamPortfolios = ctx.portfolioMap[allvuePortfolio] || [];
     if (!tranche) exception(`Asset ${assetId} is not mapped to a PAM tranche. Set the tranche up in PAM and add it to the tranche map.`);
-    if (!pamPortfolios.length) exception(`AllVue portfolio ${allvuePortfolio} has no PAM portfolios in the portfolio map.`);
+    if (problems.size) exception(`The AllVue portfolios holding this facility disagree on ${[...problems].join(' and ')}. Those are the facility's, so they must match.`);
 
-    if (g.current.length && fundedAfter + unfundedAfter + lcAfter !== commitmentAfter) {
-      exception(`Funded ${money(fundedAfter)} plus unfunded ${money(unfundedAfter)}${lcAfter ? ` plus letters of credit ${money(lcAfter)}` : ''} does not equal the commitment of ${money(commitmentAfter)} in the AllVue export.`);
-    }
+    holdings.forEach(h => {
+      const rows = h.rows.current;
+      if (!rows.length) return;
+      const lc = sum(rows.filter(r => r.kind === 'lc'));
+      if (h.fundedAfter + h.unfundedAfter + lc !== rows[0].commitment) {
+        exception(`${label(h)}: funded ${money(h.fundedAfter)} plus unfunded ${money(h.unfundedAfter)}${lc ? ` plus letters of credit ${money(lc)}` : ''} does not equal the commitment of ${money(rows[0].commitment)} in the AllVue export.`);
+      }
+    });
     if (!['TL', 'RC', 'DDTL'].includes(facilityType)) {
       exception(`Unknown facility type "${facilityType}". Expected Term Loan, Revolver or Delayed Draw.`);
     }
@@ -587,12 +667,12 @@
       exception(`Term loan shows an unfunded amount of ${money(unfundedAfter)}. Term loans should be fully funded.`);
     }
     if (capitalizing) {
-      review(`Funded amount went up by ${money(fundedDelta)} on a contract that capitalizes interest. Booked as capitalized (PIK) interest; check it against the agent notice.`);
+      review(`Funded amount went up by ${money(bookedDelta)} on a contract that capitalizes interest. Booked as capitalized (PIK) interest; check it against the agent notice.`);
     } else if (facilityType === 'TL' && bookedDelta > 0 && !isNew) {
-      exception(`Term loan funded amount went up by ${money(fundedDelta)}. Term loans do not draw, so check for an add-on, an incremental or a trade.`);
+      exception(`Term loan funded amount went up by ${money(bookedDelta)}. Term loans do not draw, so check for an add-on, an incremental or a trade.`);
     }
     if (!capitalizing && !isNew && facilityType !== 'TL' && bookedDelta > unfundedBefore) {
-      exception(`Draw of ${money(fundedDelta)} is larger than the prior unfunded amount of ${money(unfundedBefore)}.`);
+      exception(`Draw of ${money(bookedDelta)} is larger than the prior unfunded amount of ${money(unfundedBefore)}.`);
     }
 
     if (g.current.length && !isNew && !isTrade && commitmentAfter !== commitmentBefore) {
@@ -630,12 +710,14 @@
     if (isNew) {
       info(`New position of ${money(fundedAfter)}. The trade feed books the purchase in PAM; this app sends nothing for it. Link the PAM contract it lands in once the trade has posted.`);
     }
-    if (isTrade && !restructured) {
-      info(`Your position changed by ${money(fundedDelta)} while the facility's global amount didn't: a ${fundedDelta < 0 ? 'sale' : 'purchase'}. The trade feed books it in PAM; this app sends nothing for it.`);
-    }
-    if (isTrade && restructured) {
-      review(`A ${fundedDelta < 0 ? 'sale' : 'purchase'} of ${money(Math.abs(fundedDelta))} happened on the same day as this restructure. The messages below move the holdings as they were before the trade; the trade feed books the trade separately. Check the amounts once the trade has posted in PAM.`);
-    }
+    holdings.filter(h => h.tradeDelta !== 0).forEach(h => {
+      const what = h.isNew ? `a new holding of ${money(h.fundedAfter)}` : `a ${h.tradeDelta < 0 ? 'sale' : 'purchase'} of ${money(Math.abs(h.tradeDelta))}`;
+      if (restructured) {
+        review(`${label(h)}: ${what} on the same day as this restructure. Its messages below move the holdings as they were before the trade; the trade feed books the trade separately. Check the amounts once the trade has posted in PAM.`);
+      } else {
+        info(`${label(h)}: ${what} while the facility's global amount didn't change. The trade feed books it in PAM; this app sends nothing for it.`);
+      }
+    });
 
     if (type === 'COMPLEX') {
       review(`${expired.length} contracts roll into ${added.length}. Booked as a combine into contract ${added[0].contractId}, then a split out to the others. Check the amounts against the agent notice.`);
@@ -653,13 +735,13 @@
     // ---- global amounts: needed for PAM's global actions.
     if (missingGlobal.length) {
       exception(`No global amount for contract ${[...new Set(missingGlobal.map(c => c.contractId))].join(', ')}. PAM's global action needs it.`);
-    } else if (globalBefore > 0 && g.current.length && !isTrade) {
-      if (globalDelta !== 0) {
-        const expectedDelta = Math.round(globalDelta * fundedBefore / globalBefore);
-        if (Math.abs(fundedDelta - expectedDelta) > Math.max(500, Math.abs(expectedDelta) * 0.0001)) {
-          review(`Your change of ${money(fundedDelta)} is not your ${(fundedBefore / globalBefore * 100).toFixed(4)}% share of the global change of ${money(globalDelta)} (expected ${money(expectedDelta)}). There may be a trade on the same day; check before booking.`);
+    } else if (globalBefore > 0 && g.current.length && globalDelta !== 0) {
+      holdings.filter(h => !h.isNew && h.fundedBefore > 0).forEach(h => {
+        const expectedDelta = Math.round(globalDelta * h.fundedBefore / globalBefore);
+        if (Math.abs(h.delta - expectedDelta) > Math.max(500, Math.abs(expectedDelta) * 0.0001)) {
+          review(`${label(h)}: change of ${money(h.delta)} is not its ${(h.fundedBefore / globalBefore * 100).toFixed(4)}% share of the global change of ${money(globalDelta)} (expected ${money(expectedDelta)}). There may be a trade on the same day; check before booking.`);
         }
-      }
+      });
     }
 
     const pamIdOf = c => ctx.lineage[c.contractId] || '';
@@ -667,31 +749,41 @@
       if (!pamIdOf(c)) exception(`AllVue contract ${c.contractId} has no linked PAM contract in the lineage table.`);
     });
 
-    // ---- PAM positions: tie-out and allocation basis
-    let allocationBasis = [];
-    if (tranche && pamPortfolios.length) {
-      allocationBasis = pamPortfolios.map(pp => {
+    // ---- per AllVue portfolio: PAM tie-out, allocation basis, same contracts as the facility
+    const idSet = list => list.map(c => c.contractId).sort().join('+');
+    holdings.forEach(h => {
+      h.pamPortfolios = ctx.portfolioMap[h.allvuePortfolio] || [];
+      h.basis = [];
+      if (!h.pamPortfolios.length) { exception(`AllVue portfolio ${label(h)} has no PAM portfolios in the portfolio map.`); return; }
+      if (!tranche) return;
+      h.basis = h.pamPortfolios.map(pp => {
         const pos = ctx.pamPositions.find(p => p.pamPortfolio === pp && p.pamTrancheId === tranche.pamTrancheId);
         const funded = pos ? pos.funded : 0;
         const unfunded = pos ? pos.unfunded : 0;
-        return { pamPortfolio: pp, funded, unfunded, weight: funded + unfunded };
+        return { allvuePortfolio: h.allvuePortfolio, pamPortfolio: pp, funded, unfunded, weight: funded + unfunded };
       });
-      const pamFunded = allocationBasis.reduce((s, b) => s + b.funded, 0);
-      const pamUnfunded = allocationBasis.reduce((s, b) => s + b.unfunded, 0);
-      if (allocationBasis.every(b => b.weight === 0) && !isNew) {
-        exception(`No PAM positions found in tranche ${tranche.pamTrancheId} for ${pamPortfolios.join(', ')}. A new position needs its trade booked in PAM first.`);
-      } else {
-        if (pamFunded !== fundedBefore) {
-          exception(`PAM funded position of ${money(pamFunded)} does not tie to AllVue's ${money(fundedBefore)} before this event (difference ${money(pamFunded - fundedBefore)}). Clear the break before booking.`);
-        }
-        if (pamUnfunded !== unfundedBefore) {
-          exception(`PAM unfunded position of ${money(pamUnfunded)} does not tie to AllVue's ${money(unfundedBefore)} before this event.`);
-        }
+      h.pamFunded = h.basis.reduce((t, b) => t + b.funded, 0);
+      h.pamUnfunded = h.basis.reduce((t, b) => t + b.unfunded, 0);
+      h.ties = h.pamFunded === h.fundedBefore && h.pamUnfunded === h.unfundedBefore;
+      if (h.isNew) return;
+      if (h.basis.every(b => b.weight === 0) && h.fundedBefore + h.unfundedBefore > 0) {
+        exception(`${label(h)}: no PAM positions in tranche ${tranche.pamTrancheId} for ${h.pamPortfolios.join(', ')}.`);
+        return;
       }
-    }
+      if (h.pamFunded !== h.fundedBefore) {
+        exception(`${label(h)}: PAM funded position of ${money(h.pamFunded)} does not tie to AllVue's ${money(h.fundedBefore)} before this event (difference ${money(h.pamFunded - h.fundedBefore)}). Clear the break before booking.`);
+      }
+      if (h.pamUnfunded !== h.unfundedBefore) {
+        exception(`${label(h)}: PAM unfunded position of ${money(h.pamUnfunded)} does not tie to AllVue's ${money(h.unfundedBefore)} before this event.`);
+      }
+      if (h.changes.currentFunded.length && h.changes.priorFunded.length
+        && (idSet(h.changes.expired) !== idSet(expired) || idSet(h.changes.added) !== idSet(added))) {
+        exception(`${label(h)} holds different contracts from the rest of the facility, so one set of PAM messages can't cover it.`);
+      }
+    });
 
-
-    // ---- PAM messages
+    // ---- PAM messages: the contract create and global actions once for the facility,
+    // portfolio transactions per AllVue portfolio from its own holding.
     const newIdOf = c => {
       // New PAM contracts take the AllVue contract ID, unless PAM already uses that ID for the old contract.
       const pamId = pamIdOf(c);
@@ -699,32 +791,40 @@
     };
     // Trades and new purchases are the trade feed's: only the loan's own change is planned.
     const planType = isNew ? 'NEW_POSITION' : type === 'TRADE' ? (expired.length === 1 && added.length === 1 ? 'ROLLOVER' : 'NONE') : type;
-    const plan = buildPlan({ type: planType, expired, added, amended: planAmended, fundedDelta: bookedDelta, globalDelta: isTrade ? 0 : globalDelta, capitalizing, pamIdOf, newIdOf });
+    const plan = buildPlan({ type: planType, expired, added, amended: planAmended, fundedDelta: bookedDelta, globalDelta: isTrade && globalDelta === 0 ? 0 : globalDelta, capitalizing, pamIdOf, newIdOf });
 
     const key = [
-      allvuePortfolio, assetId, effectiveDate,
+      assetId, effectiveDate,
       `${expired.map(c => c.contractId).sort().join('+') || '-'}>${added.map(c => c.contractId).sort().join('+') || '-'}`,
       amended.length ? '~' + amended.map(a => a.cur.contractId).sort().join('+') : '',
     ].join('|').replace(/\|$/, '');
 
-    const weights = allocationBasis.filter(b => b.weight > 0).map(b => ({ key: b.pamPortfolio, weight: b.weight }));
-    const canBuild = Boolean(tranche && weights.length);
-    if (canBuild) plan.steps.forEach(step => allocateStep(step, weights));
-    const messages = canBuild ? planMessages(plan, { effectiveDate, tranche, weights, accounts: ctx.accounts }) : [];
-    if (canBuild) {
-      const per = (type, key) => {
+    holdings.forEach(h => {
+      h.weights = h.basis.filter(b => b.weight > 0).map(b => ({ key: b.pamPortfolio, weight: b.weight }));
+      if (!tranche || h.isNew || !h.weights.length) return;
+      const pc = h.changes;
+      const pAmended = h.tradeDelta !== 0 ? pc.amended.map(a => ({ ...a, amountDelta: 0 })) : pc.amended;
+      h.plan = buildPlan({ type: planType, expired: pc.expired, added: pc.added, amended: pAmended, fundedDelta: h.bookedDelta, globalDelta: 0, capitalizing, pamIdOf, newIdOf });
+      h.plan.steps.forEach(step => allocateStep(step, h.weights));
+    });
+
+    const messages = tranche ? facilityMessages(plan, holdings, { effectiveDate, tranche, accounts: ctx.accounts }, problem => exception(problem)) : [];
+    const allocationBasis = holdings.flatMap(h => h.basis);
+    if (tranche) {
+      const per = (kind, field) => {
         const totals = {};
-        messages.filter(m => m.level === 'PORTFOLIO' && m.type === type).forEach(m => { totals[m.pamPortfolio] = (totals[m.pamPortfolio] || 0) + m.unitsExchanged; });
-        Object.entries(totals).forEach(([p, units]) => {
-          const b = allocationBasis.find(x => x.pamPortfolio === p);
-          if (b && units > b[key]) exception(`${p} would ${type === 'PAYDOWN' ? 'redeem' : 'draw'} ${money(units)} but holds ${money(b[key])} ${key} in PAM.`);
+        messages.filter(m => m.level === 'PORTFOLIO' && m.type === kind).forEach(m => { totals[m.pamPortfolio] = (totals[m.pamPortfolio] || 0) + m.unitsExchanged; });
+        Object.entries(totals).forEach(([pp, units]) => {
+          const b = allocationBasis.find(x => x.pamPortfolio === pp);
+          if (b && units > b[field]) exception(`${pp} would ${kind === 'PAYDOWN' ? 'redeem' : 'draw'} ${money(units)} but holds ${money(b[field])} ${field} in PAM.`);
         });
       };
       per('PAYDOWN', 'funded');
       per('DRAW', 'unfunded');
     }
-    if (canBuild && messages.some(m => m.level === 'PORTFOLIO' && !m.manual)) {
-      const noBank = weights.map(w => w.key).filter(p => !(ctx.accounts[p] && ctx.accounts[p].bank && ctx.accounts[p].custodyAccount));
+    if (messages.some(m => m.level === 'PORTFOLIO' && !m.manual)) {
+      const used = [...new Set(messages.filter(m => m.level === 'PORTFOLIO').map(m => m.pamPortfolio))];
+      const noBank = used.filter(pp => !(ctx.accounts[pp] && ctx.accounts[pp].bank && ctx.accounts[pp].custodyAccount));
       if (noBank.length) exception(`No bank or custody account for ${noBank.join(', ')} in the portfolio map. PAM's portfolio messages need them.`);
     }
     messages.filter(m => m.level === 'SMF').forEach(m => m.inputs.forEach(input => {
@@ -735,7 +835,11 @@
     if (messages.some(m => m.manual && m.level === 'PORTFOLIO')) {
       info('Book the portfolio capitalized interest transactions in PAM after loading the file. Their message format hasn\'t been added yet.');
     }
-    const lines = plan.steps.flatMap(step => step.lines);
+    const allocations = holdings.filter(h => h.plan).map(h => ({
+      allvuePortfolio: h.allvuePortfolio, portfolioName: h.portfolioName, basis: h.basis,
+      lines: h.plan.steps.flatMap(step => step.lines),
+    }));
+    const lines = allocations.flatMap(a => a.lines);
 
     const hasException = flags.some(f => f.level === 'exception');
     const hasReview = flags.some(f => f.level === 'review');
@@ -745,17 +849,21 @@
           : type === 'ROLLOVER' && !legs.length && !amended.length ? 'auto'
             : 'review';
 
-    // ---- lineage: which PAM contract each new AllVue contract represents
-    const lineageUpdates = plan.lineage;
-
     return {
-      key, allvuePortfolio, portfolioName, assetId, assetName, issuerName, facilityType, effectiveDate,
+      key, assetId, assetName, issuerName, facilityType, effectiveDate,
+      allvuePortfolios: holdings.map(h => h.allvuePortfolio),
+      holdings: holdings.map(h => ({
+        allvuePortfolio: h.allvuePortfolio, portfolioName: h.portfolioName,
+        fundedBefore: h.fundedBefore, fundedAfter: h.fundedAfter, unfundedBefore: h.unfundedBefore, unfundedAfter: h.unfundedAfter,
+        tradeDelta: h.tradeDelta, isNew: h.isNew, pamPortfolios: h.pamPortfolios || [],
+        pamFunded: h.pamFunded ?? null, pamUnfunded: h.pamUnfunded ?? null, ties: h.ties ?? null,
+      })),
       type, typeLabel: TYPE_LABELS[type], legs, route, flags,
       expired, added, amended, unchanged, rollTermChanges,
       totals: { fundedBefore, fundedAfter, fundedDelta, bookedDelta, unfundedBefore, unfundedAfter, commitmentBefore, commitmentAfter, globalBefore, globalAfter, globalDelta },
       isTrade, isNew,
       pamTrancheId: tranche ? tranche.pamTrancheId : '',
-      allocationBasis, creates: plan.creates, steps: plan.steps, lines, messages, lineageUpdates,
+      allocationBasis, allocations, creates: plan.creates, steps: plan.steps, lines, messages, lineageUpdates: plan.lineage,
     };
   }
 
@@ -798,6 +906,7 @@
 
     switch (type) {
       case 'ROLLOVER': {
+        if (!expired.length || !added.length) break;
         // Same terms: the PAM contract carries on, so only an amount change is booked.
         const pamId = pamIdOf(expired[0]);
         lineage.push({ allvueContractId: added[0].contractId, pamContractId: pamId });
@@ -812,6 +921,7 @@
         }
         break;
       case 'SPLIT': {
+        if (!expired.length || !added.length) break;
         const ids = added.map(create);
         const pre = spread(added);
         step('CONTRACT_SPLIT', added.map((c, i) => line('CONTRACT_SPLIT', pamIdOf(expired[0]), ids[i], pre[i].amount, pre[i].globalAmount, `Split into ${c.tenor} contract ${c.contractId}`)));
@@ -819,12 +929,14 @@
         break;
       }
       case 'COMBINE': {
+        if (!expired.length || !added.length) break;
         const id = create(added[0]);
         step('CONTRACT_COMBINE', expired.map(c => line('CONTRACT_COMBINE', pamIdOf(c), id, c.amount, c.globalAmount, `Combine ${c.contractId} into ${added[0].contractId}`)));
         legs([{ id, amount: added[0].amount, globalAmount: added[0].globalAmount }], fundedDelta < 0 ? 'Paydown after the combine' : 'Draw after the combine');
         break;
       }
       case 'COMPLEX': {
+        if (!expired.length || !added.length) break;
         const ids = added.map(create);
         const pre = spread(added);
         step('CONTRACT_COMBINE', expired.map(c => line('CONTRACT_COMBINE', pamIdOf(c), ids[0], c.amount, c.globalAmount, `Combine ${c.contractId} into ${added[0].contractId}`)));
@@ -891,22 +1003,21 @@
 
   /**
    * PAM messages in load order:
-   *   - contract creates (security master),
-   *   - per step, one BANKLOANACTION global action with signed global units per
-   *     contract (sources negative, targets positive),
-   *   - then one portfolio message per PAM portfolio: TaCONTRACTSPLIT names the
-   *     source contract and allocates to the targets; TaCONTRACTCOMBINE names
-   *     the target and allocates from the sources.
+   *   - one contract create (security master) for the facility's new contracts,
+   *   - per step, one BANKLOANACTION global action for the facility with signed
+   *     global units per contract (sources negative, targets positive),
+   *   - then that step's portfolio transactions for every PAM portfolio holding
+   *     the facility, from each AllVue portfolio's own plan.
    * Messages whose PAM format hasn't been supplied yet are marked manual and
-   * left out of the file.
+   * left out of the file. onProblem reports a portfolio whose plan doesn't line
+   * up with the facility's steps.
    */
-  function planMessages(plan, { effectiveDate, tranche, weights, accounts }) {
+  function facilityMessages(plan, holdings, { effectiveDate, tranche, accounts }, onProblem) {
     const out = [];
     let stepNo = 0;
     const common = { facilityId: tranche.pamTrancheId, effectiveDate, maturityDate: tranche.maturityDate };
     if (plan.creates.length) {
       stepNo++;
-      // One SMFBANKLOANTRANCHE UPDATE per event carrying every new contract on the tranche.
       out.push({
         ...common, step: stepNo, level: 'SMF', type: 'CONTRACT_CREATE',
         contractId: plan.creates.map(c => c.pamContractId).join(', '),
@@ -914,10 +1025,10 @@
         inputs: plan.creates.map(c => contractAddInput(c, tranche)),
       });
     }
+    const cursors = new Map(holdings.map(h => [h, 0]));
     plan.steps.forEach(step => {
       stepNo++;
       const base = { ...common, step: stepNo, type: step.action };
-      // Global action: net signed units per contract.
       const net = new Map();
       const add = (id, units) => { if (id) net.set(id, (net.get(id) || 0) + units); };
       step.lines.forEach(l => {
@@ -927,43 +1038,59 @@
       });
       const recs = [...net.entries()].filter(([, u]) => u !== 0).map(([contractId, units]) => ({ contractId, units }));
       if (recs.length) out.push({ ...base, level: 'GLOBAL', actionType: PAM.actionType[step.action], allocs: recs });
-
-      if (step.action === 'CONTRACT_SPLIT' || step.action === 'CONTRACT_COMBINE') {
-        const isSplit = step.action === 'CONTRACT_SPLIT';
-        const groups = new Map();
-        step.lines.forEach(l => {
-          const k = isSplit ? l.fromId : l.toId;
-          if (!groups.has(k)) groups.set(k, []);
-          groups.get(k).push(l);
-        });
-        for (const [contractId, group] of groups) {
-          weights.forEach(w => {
-            const allocs = group.map(l => ({ contractId: isSplit ? l.toId : l.fromId, units: l.allocation[w.key] })).filter(a => a.units !== 0);
-            const units = allocs.reduce((t, a) => t + a.units, 0);
-            if (units) out.push({ ...base, level: 'PORTFOLIO', pamPortfolio: w.key, account: accounts[w.key] || {}, contractId, unitsExchanged: units, allocs });
-          });
-        }
-      } else if (step.action === 'PAYDOWN') {
-        // TaContractRedemption redeems one contract per message.
-        step.lines.forEach(l => weights.forEach(w => {
-          const units = l.allocation[w.key];
-          if (units) out.push({ ...base, level: 'PORTFOLIO', pamPortfolio: w.key, account: accounts[w.key] || {}, contractId: l.fromId, unitsExchanged: units, allocs: [] });
-        }));
-      } else if (step.action === 'DRAW') {
-        // TaDrawDown: one message per portfolio, allocated to the contracts drawn into.
-        weights.forEach(w => {
-          const allocs = step.lines.map(l => ({ contractId: l.toId, units: l.allocation[w.key] })).filter(a => a.units !== 0);
-          const units = allocs.reduce((t, a) => t + a.units, 0);
-          if (units) out.push({ ...base, level: 'PORTFOLIO', pamPortfolio: w.key, account: accounts[w.key] || {}, contractId: '', unitsExchanged: units, allocs });
-        });
-      } else {
-        // Capitalized interest: no PAM message format yet, so it stays a manual step.
-        step.lines.forEach(l => weights.forEach(w => {
-          const units = l.allocation[w.key];
-          if (units) out.push({ ...base, level: 'PORTFOLIO', manual: true, pamPortfolio: w.key, contractId: l.fromId || l.toId, unitsExchanged: units, allocs: [] });
-        }));
-      }
+      holdings.filter(h => h.plan).forEach(h => {
+        const steps = h.plan.steps;
+        let j = cursors.get(h);
+        while (j < steps.length && steps[j].action !== step.action) j++;
+        if (j >= steps.length) return;
+        cursors.set(h, j + 1);
+        portfolioStepMessages(steps[j], { ...base, allvuePortfolio: h.allvuePortfolio }, h.weights, accounts).forEach(m => out.push(m));
+      });
     });
+    holdings.filter(h => h.plan && cursors.get(h) < h.plan.steps.filter(st => st.lines.some(l => l.amount)).length).forEach(h => {
+      onProblem(`${h.portfolioName || h.allvuePortfolio}'s PAM steps don't line up with the facility's, so its messages can't be generated.`);
+    });
+    return out;
+  }
+
+  /** One step's portfolio transactions for one AllVue portfolio's PAM portfolios. */
+  function portfolioStepMessages(step, base, weights, accounts) {
+    const out = [];
+    if (step.action === 'CONTRACT_SPLIT' || step.action === 'CONTRACT_COMBINE') {
+      const isSplit = step.action === 'CONTRACT_SPLIT';
+      const groups = new Map();
+      step.lines.forEach(l => {
+        const k = isSplit ? l.fromId : l.toId;
+        if (!groups.has(k)) groups.set(k, []);
+        groups.get(k).push(l);
+      });
+      for (const [contractId, group] of groups) {
+        weights.forEach(w => {
+          const allocs = group.map(l => ({ contractId: isSplit ? l.toId : l.fromId, units: l.allocation[w.key] })).filter(a => a.units !== 0);
+          const units = allocs.reduce((t, a) => t + a.units, 0);
+          if (units) out.push({ ...base, level: 'PORTFOLIO', pamPortfolio: w.key, account: accounts[w.key] || {}, contractId, unitsExchanged: units, allocs });
+        });
+      }
+    } else if (step.action === 'PAYDOWN') {
+      // TaContractRedemption redeems one contract per message.
+      step.lines.forEach(l => weights.forEach(w => {
+        const units = l.allocation[w.key];
+        if (units) out.push({ ...base, level: 'PORTFOLIO', pamPortfolio: w.key, account: accounts[w.key] || {}, contractId: l.fromId, unitsExchanged: units, allocs: [] });
+      }));
+    } else if (step.action === 'DRAW') {
+      // TaDrawDown: one message per portfolio, allocated to the contracts drawn into.
+      weights.forEach(w => {
+        const allocs = step.lines.map(l => ({ contractId: l.toId, units: l.allocation[w.key] })).filter(a => a.units !== 0);
+        const units = allocs.reduce((t, a) => t + a.units, 0);
+        if (units) out.push({ ...base, level: 'PORTFOLIO', pamPortfolio: w.key, account: accounts[w.key] || {}, contractId: '', unitsExchanged: units, allocs });
+      });
+    } else {
+      // Capitalized interest: no PAM message format yet, so it stays a manual step.
+      step.lines.forEach(l => weights.forEach(w => {
+        const units = l.allocation[w.key];
+        if (units) out.push({ ...base, level: 'PORTFOLIO', manual: true, pamPortfolio: w.key, contractId: l.fromId || l.toId, unitsExchanged: units, allocs: [] });
+      }));
+    }
     return out;
   }
 

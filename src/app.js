@@ -6,7 +6,7 @@
   'use strict';
   const E = window.Engine;
   const S = window.SampleData;
-  const STORE_KEY = 'loan-event-bridge:v8';
+  const STORE_KEY = 'loan-event-bridge:v9';
 
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const money = E.formatMoney;
@@ -138,12 +138,20 @@
   const assetTitle = item => [issuerOf(item), instrumentOf(item)].filter(Boolean).join(' ');
   const eventLabel = ev => ev.kind === 'fee'
     ? `${ev.feeType}, ${assetTitle(ev)} (${portfolioName(ev)}), ${periodText(ev)}`
-    : `${ev.typeLabel}, ${assetTitle(ev)} (${portfolioName(ev)})`;
+    : `${ev.typeLabel}, ${assetTitle(ev)}`;
 
   /** Issuer over instrument, with the facility ID and type underneath. */
   function assetCell(item) {
     const issuer = issuerOf(item);
     return `${issuer ? `<div>${esc(issuer)}</div><div class="small">${esc(instrumentOf(item))}</div>` : esc(item.assetName)}<div class="muted small"><span class="mono">${esc(item.assetId)}</span> · ${esc(item.facilityType)}</div>`;
+  }
+
+  /** Where an event's facility is held: AllVue portfolios, with the PAM portfolio count. */
+  function heldInCell(ev) {
+    const hs = ev.holdings || [];
+    const pam = hs.reduce((t, h) => t + (h.pamPortfolios || []).length, 0);
+    const names = hs.map(h => h.portfolioName || h.allvuePortfolio);
+    return `<div>${hs.length === 1 ? esc(names[0]) : `${hs.length} AllVue portfolios`}</div><div class="muted small">${pam} PAM ${pam === 1 ? 'portfolio' : 'portfolios'}</div>`;
   }
 
   function portfolioCell(item) {
@@ -483,7 +491,7 @@
     const rows = state.events.filter(ev => {
       if (state.filter !== 'all' && STATUS[statusOf(ev)].group !== state.filter) return false;
       if (!q) return true;
-      const hay = [ev.assetName, issuerOf(ev), portfolioName(ev), ev.assetId, ev.allvuePortfolio, ev.typeLabel, ...ev.expired.map(c => c.contractId), ...ev.added.map(c => c.contractId), ...ev.amended.map(a => a.cur.contractId)].join(' ').toLowerCase();
+      const hay = [ev.assetName, issuerOf(ev), ...(ev.holdings || []).flatMap(h => [h.portfolioName, h.allvuePortfolio, ...(h.pamPortfolios || [])]), ev.assetId, ev.typeLabel, ...ev.expired.map(c => c.contractId), ...ev.added.map(c => c.contractId), ...ev.amended.map(a => a.cur.contractId)].join(' ').toLowerCase();
       return hay.includes(q);
     });
     if (!rows.length) {
@@ -491,7 +499,7 @@
       return `<div class="table-wrap"><div class="empty">${msg}</div></div>`;
     }
     return `<div class="table-wrap"><table>
-      <thead><tr><th>Status</th><th>Event</th><th>Asset</th><th>AllVue portfolio</th><th>Effective</th><th>AllVue contracts</th><th class="num">Funded change</th><th class="num">PAM msgs</th><th>Checks</th></tr></thead>
+      <thead><tr><th>Status</th><th>Event</th><th>Asset</th><th>Held in</th><th>Effective</th><th>AllVue contracts</th><th class="num">Funded change</th><th class="num">PAM msgs</th><th>Checks</th></tr></thead>
       <tbody>${rows.map(ev => {
         const st = statusOf(ev);
         const info = statusInfo(ev);
@@ -500,7 +508,7 @@
           <td><span class="type">${esc(ev.typeLabel)}</span> ${ev.legs.map(l => `<span class="tag">+ ${esc(E.TYPE_LABELS[l].toLowerCase())}</span>`).join(' ')}
             ${st === 'failed' && info.error ? `<div class="small" style="color:var(--bad)">${esc(info.error)}</div>` : ''}</td>
           <td>${assetCell(ev)}</td>
-          <td>${portfolioCell(ev)}</td>
+          <td>${heldInCell(ev)}</td>
           <td class="mono nowrap">${esc(ev.effectiveDate)}</td>
           <td class="mono">${esc(contractsSummary(ev))}</td>
           <td class="num">${deltaCell(ev.totals.fundedDelta)}</td>
@@ -583,6 +591,34 @@
           ${fields.map(f => cell(r, f, f === 'floorPct' ? Number(r.c[f]).toFixed(2) : r.c[f], f === 'marginBps' || f === 'floorPct' ? 'num' : '')).join('')}
         </tr>`;
       }).join('')}</tbody></table></div>`;
+  }
+
+  /** Each AllVue portfolio's holding before and after, tied out to its PAM portfolios. */
+  function holdingsTable(ev) {
+    const hs = ev.holdings || [];
+    const tie = h => (h.ties === null ? '<span class="muted">n/a</span>'
+      : h.isNew ? '<span class="muted">New holding</span>'
+        : h.ties ? '<span style="color:var(--ok)">Ties</span>'
+          : `<span style="color:var(--bad)">Off by ${money((h.pamFunded + h.pamUnfunded) - (h.fundedBefore + h.unfundedBefore))}</span>`);
+    return `<div class="table-wrap"><table>
+      <thead><tr><th>AllVue portfolio</th><th class="num">Funded before</th><th class="num">Funded after</th><th class="num">Unfunded before</th><th>PAM portfolios</th><th class="num">PAM funded before</th><th>Tie-out</th></tr></thead>
+      <tbody>${hs.map(h => `<tr>
+        <td>${esc(h.portfolioName || h.allvuePortfolio)}${h.portfolioName ? `<div class="muted small mono">${esc(h.allvuePortfolio)}</div>` : ''}${h.tradeDelta ? `<div class="small" style="color:var(--teal)">Trade ${money(h.tradeDelta)}</div>` : ''}</td>
+        <td class="num">${money(h.fundedBefore)}</td><td class="num">${money(h.fundedAfter)}</td><td class="num">${money(h.unfundedBefore)}</td>
+        <td class="mono small">${(h.pamPortfolios || []).map(pp => `<span class="nowrap">${esc(pp)}</span>`).join(', ') || '<span class="muted">none</span>'}</td>
+        <td class="num">${h.pamFunded === null ? '' : money(h.pamFunded)}</td><td class="small">${tie(h)}</td></tr>`).join('')}</tbody>
+      ${hs.length > 1 ? `<tfoot><tr><td>Total</td><td class="num">${money(ev.totals.fundedBefore)}</td><td class="num">${money(ev.totals.fundedAfter)}</td><td class="num">${money(ev.totals.unfundedBefore)}</td><td></td><td class="num">${money(hs.reduce((t, h) => t + (h.pamFunded || 0), 0))}</td><td></td></tr></tfoot>` : ''}
+    </table></div>
+    <p class="small muted">PAM holdings are as of the AllVue prior snapshot. Any AllVue portfolio that doesn't tie blocks the whole event, because the global action is shared.</p>`;
+  }
+
+  /** One allocation table per AllVue portfolio that has PAM transactions. */
+  function eventAllocations(ev) {
+    if (ev.isNew) return '<p class="muted">No PAM holdings yet. The trade feed allocates the purchase to funds.</p>';
+    const list = ev.allocations || [];
+    if (!list.length) return '<p class="muted">No allocation: the asset or portfolio is not mapped to PAM, or nothing is sent.</p>';
+    return list.map(a => `<div class="stack">${list.length > 1 ? `<div class="small"><b>${esc(a.portfolioName || a.allvuePortfolio)}</b></div>` : ''}
+      ${allocationTable({ allocationBasis: a.basis, lines: a.lines, pamTrancheId: ev.pamTrancheId })}</div>`).join('');
   }
 
   function allocationTable(ev, basisLabel = 'PAM position before event<br>(funded + unfunded)') {
@@ -681,7 +717,7 @@
       <aside class="drawer" role="dialog" aria-modal="true" aria-label="${esc(eventLabel(ev))}">
         <header class="drawer-head">
           <div class="title-row">
-            <div><div class="eyebrow">${esc(ev.typeLabel)} · ${esc(ev.facilityType)} · ${esc(portfolioName(ev))}</div><h2>${esc(issuerOf(ev) || ev.assetName)}</h2>${issuerOf(ev) ? `<div class="small muted">${esc(instrumentOf(ev))} · <span class="mono">${esc(ev.assetId)}</span></div>` : ''}</div>
+            <div><div class="eyebrow">${esc(ev.typeLabel)} · ${esc(ev.facilityType)} · held in ${(ev.holdings || []).length} AllVue ${(ev.holdings || []).length === 1 ? 'portfolio' : 'portfolios'}</div><h2>${esc(issuerOf(ev) || ev.assetName)}</h2>${issuerOf(ev) ? `<div class="small muted">${esc(instrumentOf(ev))} · <span class="mono">${esc(ev.assetId)}</span></div>` : ''}</div>
             <button class="btn" data-action="close" id="drawer-close">Close</button>
           </div>
           <div class="row">${chip(statusOf(ev))} ${ev.legs.map(l => `<span class="tag">+ ${esc(E.TYPE_LABELS[l].toLowerCase())}</span>`).join(' ')} <span class="small muted">Effective <span class="mono">${esc(ev.effectiveDate)}</span></span></div>
@@ -690,7 +726,7 @@
           <section><p>${describe(ev)}</p></section>
           ${ev.flags.length ? `<section><h3>Checks</h3><ul class="flags">${ev.flags.map(f => `<li class="flag ${f.level}"><b>${flagLabel[f.level]}.</b>${esc(f.text)}</li>`).join('')}</ul></section>` : ''}
           <section><h3>AllVue contracts</h3>${contractTable(ev)}<p class="small muted">Highlighted cells differ from the expiring contract, or show an irregular period length.</p></section>
-          <section><h3>Tranche totals in ${esc(portfolioName(ev))}</h3>
+          <section><h3>Facility totals, all portfolios</h3>
             <dl class="kv">
               <div><dt>Funded</dt><dd class="figure">${money(t.fundedBefore)} → ${money(t.fundedAfter)}</dd><dd class="small">${deltaCell(t.fundedDelta)}</dd></div>
               <div><dt>Unfunded</dt><dd class="figure">${money(t.unfundedBefore)} → ${money(t.unfundedAfter)}</dd></div>
@@ -698,7 +734,8 @@
               <div><dt>Global funded</dt><dd class="figure">${money(t.globalBefore)} → ${money(t.globalAfter)}</dd><dd class="small muted">${t.globalBefore ? `Your share ${(t.fundedBefore / t.globalBefore * 100).toFixed(4)}%` : ''}</dd></div>
               <div><dt>PAM tranche</dt><dd class="mono">${esc(ev.pamTrancheId) || 'Not mapped'}</dd></div>
             </dl></section>
-          <section><h3>Allocation to PAM portfolios</h3>${allocationTable(ev)}</section>
+          <section><h3>Holdings by portfolio</h3>${holdingsTable(ev)}</section>
+          <section><h3>Allocation to PAM portfolios</h3>${eventAllocations(ev)}</section>
           <section><div class="section-head"><h3>PAM messages</h3>${fileMsgs(ev).length ? '<button class="btn ghost" data-action="copyMessages">Copy messages</button>' : ''}</div>${messageTable(ev)}</section>
           <section><h3>Event key</h3><p class="mono small" style="word-break:break-all">${esc(ev.key)}</p><p class="small muted">The same AllVue change always produces the same key, so re-running detection never creates a duplicate.</p></section>
           ${history.length ? `<section><h3>History</h3><ul class="flags">${history.map(h => `<li class="flag info"><b>${esc(h.action)}</b> by ${esc(h.user)}, ${fmtTime(h.at)}${h.note ? `. “${esc(h.note)}”` : ''}</li>`).join('')}</ul></section>` : ''}

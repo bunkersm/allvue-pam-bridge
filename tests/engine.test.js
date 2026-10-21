@@ -17,7 +17,8 @@ function detectSample(mutate) {
     lineage: E.normalizeLineage(d.lineage),
   });
 }
-const byAsset = (events, id, port = 'LOANS-MASTER') => events.find(e => e.assetId === id && e.allvuePortfolio === port);
+// Events are per facility; the portfolio argument is ignored (kept so older calls still read naturally).
+const byAsset = (events, id) => events.find(e => e.assetId === id);
 
 test('allocation always adds back to the amount to the cent', () => {
   const weights = [{ key: 'A', weight: 500 }, { key: 'B', weight: 300 }, { key: 'C', weight: 200 }];
@@ -32,9 +33,9 @@ test('allocation always adds back to the amount to the cent', () => {
 test('sample month-end produces the expected routes', () => {
   const events = detectSample();
   const count = r => events.filter(e => e.route === r).length;
-  assert.equal(events.length, 27);
-  assert.equal(count('auto'), 13);
-  assert.equal(count('review'), 11);
+  assert.equal(events.length, 26);
+  assert.equal(count('auto'), 11);
+  assert.equal(count('review'), 12);
   assert.equal(count('exception'), 2);
   assert.equal(count('trade'), 1);
 });
@@ -574,8 +575,67 @@ test('report: portfolio name, issuer (legalEntityName) and instrument name carry
   const current = E.fromAllVueReport([reportRow({ '[portfolioName]': 'Sample Fund I', '[legalEntityName]': 'Sample Issuer LLC', '[instrumentName]': 'Term Loan B',
     '[referenceAccrualId]': 'AC0002', '[beginDate]': '2026-11-16', '[endDate]': '2026-12-16' })], { asOfDate: '2026-11-16' }).rows;
   const [ev] = E.detectEvents({ asOfDate: '2026-11-16', prior: E.normalizeAllVue(prior), current: E.normalizeAllVue(current), trancheMap: {}, portfolioMap: {}, pamPositions: [], lineage: { AC0001: 'PC1' } });
-  assert.equal(ev.portfolioName, 'Sample Fund I');
+  assert.equal(ev.holdings[0].portfolioName, 'Sample Fund I');
   assert.equal(ev.issuerName, 'Sample Issuer LLC');
   assert.equal(ev.assetName, 'Term Loan B');
   assert.equal(E.displayName(ev), 'Sample Issuer LLC Term Loan B');
+});
+
+// ---------------------------------------------------------------- facility-level events
+
+test('a facility held in two AllVue portfolios is one event with one global action', () => {
+  const ev = byAsset(detectSample(), 'A1003'); // Copperline: 10% paydown at the roll, held in both portfolios
+  assert.equal(detectSample().filter(e => e.assetId === 'A1003').length, 1);
+  assert.equal(ev.holdings.length, 2);
+  assert.ok(ev.holdings.every(h => h.ties));
+  assert.deepEqual(ev.legs, ['PAYDOWN']);
+  const global = ev.messages.filter(m => m.level === 'GLOBAL');
+  assert.equal(global.length, 1, 'one global action, not one per portfolio');
+  assert.equal(global[0].allocs[0].units, ev.totals.globalDelta);
+  const redemptions = ev.messages.filter(m => m.level === 'PORTFOLIO');
+  assert.deepEqual(redemptions.map(m => m.pamPortfolio).sort(), ['CLO-2023-1', 'CLO-2024-1', 'FUND-I', 'FUND-II', 'SMA-ALPHA']);
+  assert.equal(redemptions.reduce((t, m) => t + m.unitsExchanged, 0), -ev.totals.fundedDelta);
+  // Each AllVue portfolio redeems its own share.
+  const byPortfolio = p => redemptions.filter(m => m.allvuePortfolio === p).reduce((t, m) => t + m.unitsExchanged, 0);
+  assert.equal(byPortfolio('LOANS-MASTER'), E.toCents(1200000));
+  assert.equal(byPortfolio('CLO-MASTER'), E.toCents(800000));
+});
+
+test('a break in one AllVue portfolio blocks the whole facility event', () => {
+  const events = detectSample(d => {
+    const row = d.pamPositions.find(r => r.PAMTrancheID === 'PT-1003' && r.PAMPortfolio === 'CLO-2023-1');
+    row.Funded = E.fromCents(E.toCents(row.Funded) + 10000);
+  });
+  const ev = byAsset(events, 'A1003');
+  assert.equal(ev.route, 'exception');
+  assert.ok(ev.flags.some(f => /^CLO Master Portfolio: PAM funded position/.test(f.text)));
+  assert.equal(ev.holdings.find(h => h.allvuePortfolio === 'LOANS-MASTER').ties, true);
+  assert.equal(ev.holdings.find(h => h.allvuePortfolio === 'CLO-MASTER').ties, false);
+});
+
+test('portfolios must agree on a contract\'s global amount', () => {
+  const events = detectSample(d => {
+    d.current.find(r => r.AssetID === 'A1003' && r.AllVuePortfolio === 'CLO-MASTER').GlobalAmount = '449000000.00';
+  });
+  const ev = byAsset(events, 'A1003');
+  assert.equal(ev.route, 'exception');
+  assert.ok(ev.flags.some(f => /disagree on the global amount of contract 418951/.test(f.text)));
+});
+
+test('a trade in one portfolio on a clean roll is left to the trade feed for the whole facility', () => {
+  const events = detectSample(d => {
+    // Copperline rolls with no paydown, but the CLO portfolio sells 2,000,000.
+    d.current.filter(r => r.AssetID === 'A1003').forEach(r => { r.GlobalAmount = '500000000.00'; });
+    const loans = d.current.find(r => r.AssetID === 'A1003' && r.AllVuePortfolio === 'LOANS-MASTER');
+    loans.Amount = '12000000.00'; loans.Commitment = '12000000.00';
+    const clo = d.current.find(r => r.AssetID === 'A1003' && r.AllVuePortfolio === 'CLO-MASTER');
+    clo.Amount = '6000000.00'; clo.Commitment = '6000000.00';
+  });
+  const ev = byAsset(events, 'A1003');
+  assert.equal(ev.type, 'TRADE');
+  assert.equal(ev.route, 'trade');
+  assert.equal(ev.messages.length, 0);
+  assert.equal(ev.holdings.find(h => h.allvuePortfolio === 'CLO-MASTER').tradeDelta, E.toCents(-2000000));
+  assert.equal(ev.holdings.find(h => h.allvuePortfolio === 'LOANS-MASTER').tradeDelta, 0);
+  assert.ok(ev.flags.some(f => /^CLO Master Portfolio: a sale of 2,000,000.00/.test(f.text)));
 });

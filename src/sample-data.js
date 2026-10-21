@@ -42,7 +42,8 @@
     { id: 'A1001', name: 'Alder Ridge Foods TLB', port: 'LOANS-MASTER', fac: 'TL', margin: 325, floor: 0.5, ...roll('1M', 14962500) },
     { id: 'A1002', name: 'Bluestem Logistics TLB', port: 'LOANS-MASTER', fac: 'TL', margin: 400, floor: 0.75, ...roll('3M', 22343750) },
     { id: 'A1003', name: 'Copperline Software TL', port: 'LOANS-MASTER', fac: 'TL', margin: 350, floor: 0.5, share: 0.024,
-      prior: [prior('1M', 12000000, { id: '418901' })], current: [next('1M', 12000000, { id: '418951' })] },
+      // Held in both AllVue portfolios; paid down 10% at the roll. One event, one global action.
+      prior: [prior('1M', 12000000, { id: '418901' })], current: [next('1M', 10800000, { id: '418951' })] },
     { id: 'A1004', name: 'Driftwood Health TLB', port: 'LOANS-MASTER', fac: 'TL', margin: 475, floor: 0.5, ...roll('3M', 9875000) },
     { id: 'A1005', name: 'Elmhurst Packaging TLB', port: 'LOANS-MASTER', fac: 'TL', margin: 375, floor: 0.5,
       prior: [prior('1M', 17456250)], current: [next('1M', 17456250, { margin: 350 })] },
@@ -79,7 +80,7 @@
 
     // ---- CLO-MASTER
     { id: 'A1003', name: 'Copperline Software TL', port: 'CLO-MASTER', fac: 'TL', margin: 350, floor: 0.5, share: 0.016,
-      prior: [prior('1M', 8000000, { id: '418901' })], current: [next('1M', 8000000, { id: '418951' })] },
+      prior: [prior('1M', 8000000, { id: '418901' })], current: [next('1M', 7200000, { id: '418951' })] },
     { id: 'A1019', name: 'Quarry Lane Materials TLB', port: 'CLO-MASTER', fac: 'TL', margin: 350, floor: 0.5, ...roll('1M', 4987500) },
     { id: 'A1020', name: 'Redfern Telecom TL', port: 'CLO-MASTER', fac: 'TL', margin: 450, floor: 0.75, ...roll('1M', 6650000) },
     { id: 'A1021', name: 'Saltmarsh Energy TLB', port: 'CLO-MASTER', fac: 'TL', margin: 400, floor: 0.5, ...roll('3M', 5500000) },

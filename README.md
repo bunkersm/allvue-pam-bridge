@@ -16,6 +16,10 @@ npm test
 
 ## How it works
 
+### One event per facility
+
+An event is a **facility** (tranche), not a facility in one AllVue portfolio, because a paydown or restructure happens once to the loan. The contract create and each global action are generated **once**; portfolio transactions are generated for every PAM portfolio holding the facility, each AllVue portfolio from its own holding. Each AllVue portfolio is still tied out to its PAM portfolios (the event's *Holdings by portfolio* table), and **a break in any one blocks the whole event**, since the global action is shared. The portfolios must agree on each contract's global amount, terms and dates. Monthly fees stay per portfolio.
+
 ### Dates
 
 Each morning run processes one **business date** D (the previous business day):
