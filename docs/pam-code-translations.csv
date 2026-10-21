@@ -1,7 +1,7 @@
 PAMField,MessagePosition,AllVueField,AllVueValue,PAMCode,Status,Notes
-loan_type,SMFBANKLOANTRANCHE pos 4,instrumentType,Term Loan,1,From spec,Term
-loan_type,SMFBANKLOANTRANCHE pos 4,instrumentType,Revolver,2,From spec,Revolver
-loan_type,SMFBANKLOANTRANCHE pos 4,instrumentType,Delayed Draw,3,From spec,Delayed draw
+loan_type,SMFBANKLOANTRANCHE pos 4,instrumentSubType,Term Loan,1,From spec,Term
+loan_type,SMFBANKLOANTRANCHE pos 4,instrumentSubType,Revolver,2,From spec,Revolver
+loan_type,SMFBANKLOANTRANCHE pos 4,instrumentSubType,Delayed Draw,3,From spec,Delayed draw
 currency,SMFBANKLOANTRANCHE pos 6,Currency,USD,1,Assumed,Numeric PAM currency code; currently taken from the tranche map PAMCurrency column
 coupon_type,COUPONDATA pos 1,rateType,Float,V,From spec,
 coupon_type,COUPONDATA pos 1,rateType,Fixed,F,From spec,

@@ -476,7 +476,7 @@ const fs = require('fs');
 const path = require('path');
 const reportRow = over => ({
   '[portfolioId]': 'PF0001', '[instrumentId]': 'IN0001', '[primaryIdentifier]': '9000001', '[referenceAccrualId]': 'AC0001',
-  '[accrualType]': 'Funded', '[instrumentType]': 'Term Loan', '[baseRateIndexName]': '1M SOFR Term', '[rateType]': 'Float',
+  '[accrualType]': 'Funded', '[instrumentSubType]': 'Term Loan', '[baseRateIndexName]': '1M SOFR Term', '[rateType]': 'Float',
   '[interestPaymentType]': 'Cash', '[spread]': '0.05', '[spreadAdjustment]': '0.0025', '[rateFloor]': '0.01', '[rateCeiling]': '',
   '[allInRate]': '0.0907457', '[dayCount]': 'ACT/360', '[numPaymentsPerYear]': '4', '[beginDate]': '2026-10-16', '[endDate]': '2026-11-16',
   '[accrualAmount]': '1000000.00', '[globalAccrualAmount]': '50000000.00', ...over,
@@ -487,6 +487,8 @@ test('report: headers match without brackets or case; required columns are check
   assert.ok(E.isAllVueReport(headers));
   assert.deepEqual(E.missingReportColumns(headers), []);
   assert.deepEqual(E.missingReportColumns(headers.filter(h => h !== '[spread]')), ['spread']);
+  const withTypeOnly = headers.map(h => (h === '[instrumentSubType]' ? '[instrumentType]' : h));
+  assert.deepEqual(E.missingReportColumns(withTypeOnly), ['instrumentSubType'], 'instrumentType is not a stand-in for instrumentSubType');
   assert.ok(E.isAllVueReport(['portfolioID', 'referenceAccrualID']));
 });
 
@@ -511,11 +513,11 @@ test('report: rates are decimals; pay frequency from payments per year, reset fr
 
 test('report: accrual types, letters of credit in the commitment, % of Funded ignored', () => {
   const { rows } = E.fromAllVueReport([
-    reportRow({ '[instrumentType]': 'Revolver', '[accrualAmount]': '400000.00' }),
-    reportRow({ '[instrumentType]': 'Revolver', '[accrualType]': 'Unfunded', '[referenceAccrualId]': 'U1', '[accrualAmount]': '500000.00' }),
-    reportRow({ '[instrumentType]': 'Revolver', '[accrualType]': 'Letter of Credit', '[referenceAccrualId]': 'L1', '[accrualAmount]': '100000.00' }),
-    reportRow({ '[instrumentType]': 'Revolver', '[accrualType]': '% of Funded', '[referenceAccrualId]': 'F1', '[accrualAmount]': '1234.00' }),
-    reportRow({ '[instrumentType]': 'Delayed Draw', '[primaryIdentifier]': '9000002', '[accrualType]': 'Delayed Draw Unfunded', '[referenceAccrualId]': 'U2' }),
+    reportRow({ '[instrumentSubType]': 'Revolver', '[accrualAmount]': '400000.00' }),
+    reportRow({ '[instrumentSubType]': 'Revolver', '[accrualType]': 'Unfunded', '[referenceAccrualId]': 'U1', '[accrualAmount]': '500000.00' }),
+    reportRow({ '[instrumentSubType]': 'Revolver', '[accrualType]': 'Letter of Credit', '[referenceAccrualId]': 'L1', '[accrualAmount]': '100000.00' }),
+    reportRow({ '[instrumentSubType]': 'Revolver', '[accrualType]': '% of Funded', '[referenceAccrualId]': 'F1', '[accrualAmount]': '1234.00' }),
+    reportRow({ '[instrumentSubType]': 'Delayed Draw', '[primaryIdentifier]': '9000002', '[accrualType]': 'Delayed Draw Unfunded', '[referenceAccrualId]': 'U2' }),
   ], { asOfDate: '2026-10-16' });
   assert.deepEqual(rows.map(r => r.ContractType), ['Funded', 'Unfunded', 'LC', 'Other', 'Unfunded']);
   assert.ok(rows.slice(0, 4).every(r => r.Commitment === '1000000.00'));
@@ -524,7 +526,7 @@ test('report: accrual types, letters of credit in the commitment, % of Funded ig
 });
 
 test('report: unrecognised values are reported, and codes PAM lacks block the contract create', () => {
-  const { notes } = E.fromAllVueReport([reportRow({ '[accrualType]': 'Mystery', '[instrumentType]': 'Bond' })], { asOfDate: '2026-10-16' });
+  const { notes } = E.fromAllVueReport([reportRow({ '[accrualType]': 'Mystery', '[instrumentSubType]': 'Bond' })], { asOfDate: '2026-10-16' });
   assert.equal(notes.length, 2);
   const base = { ...E.contractAddInput({ ...E.normalizeAllVue(E.fromAllVueReport([reportRow({})], { asOfDate: '2026-10-16' }).rows)[0], pamContractId: 'C1' },
     { pamTrancheId: 'T1', maturityDate: '2031-01-07', currency: '1' }) };

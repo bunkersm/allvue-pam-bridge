@@ -206,13 +206,13 @@
 
   // The AllVue contracts report, one row per portfolio, facility and accrual (contract).
   // Headers are matched without brackets or case.
-  const REPORT_REQUIRED = ['portfolioId', 'instrumentId', 'primaryIdentifier', 'referenceAccrualId', 'accrualType', 'instrumentType',
+  const REPORT_REQUIRED = ['portfolioId', 'instrumentId', 'primaryIdentifier', 'referenceAccrualId', 'accrualType', 'instrumentSubType',
     'baseRateIndexName', 'rateType', 'interestPaymentType', 'spread', 'spreadAdjustment', 'rateFloor', 'dayCount',
     'numPaymentsPerYear', 'beginDate', 'endDate', 'accrualAmount', 'globalAccrualAmount'];
   const REPORT_OPTIONAL = ['portfolioName', 'legalEntityId', 'legalEntityName', 'instrumentName', 'positionId', 'baseRate',
     'rateCeiling', 'allInRate', 'instrumentOriginalGlobalAmount'];
   const REPORT_ACCRUAL_TYPE = { FUNDED: 'Funded', UNFUNDED: 'Unfunded', 'DELAYED DRAW UNFUNDED': 'Unfunded', 'LETTER OF CREDIT': 'LC', '% OF FUNDED': 'Other' };
-  const REPORT_INSTRUMENT_TYPE = { 'TERM LOAN': 'TL', REVOLVER: 'RC', 'DELAYED DRAW': 'DDTL' };
+  const REPORT_INSTRUMENT_SUBTYPE = { 'TERM LOAN': 'TL', REVOLVER: 'RC', 'DELAYED DRAW': 'DDTL' };
   const REPORT_RATE_TYPE = { FLOAT: 'Floating', FLOATING: 'Floating', FIXED: 'Fixed' };
   const REPORT_PAYMENTS = { 1: 'Annual', 2: 'Semi-Annual', 4: 'Quarterly', 12: 'Monthly', 52: 'Weekly' };
   const REPORT_DAY_COUNT = { 'ACT/360': 'ACT/360', 'ACT/365 (FIXED)': 'ACT/365', 'ACT/365': 'ACT/365', '30U/360': '30/360', '30/360': '30/360' };
@@ -252,14 +252,14 @@
     };
     const rows = reportRows.map(r => {
       const accrualType = get(r, 'accrualType');
-      const instrumentType = get(r, 'instrumentType');
+      const instrumentSubType = get(r, 'instrumentSubType');
       const rateType = get(r, 'rateType');
       const dayCount = get(r, 'dayCount');
       const payments = get(r, 'numPaymentsPerYear');
       const contractType = REPORT_ACCRUAL_TYPE[accrualType.toUpperCase()];
       if (!contractType) notes.add(`accrual type "${accrualType}" (row ignored)`);
-      const facilityType = REPORT_INSTRUMENT_TYPE[instrumentType.toUpperCase()] || instrumentType;
-      if (!REPORT_INSTRUMENT_TYPE[instrumentType.toUpperCase()]) notes.add(`instrument type "${instrumentType}"`);
+      const facilityType = REPORT_INSTRUMENT_SUBTYPE[instrumentSubType.toUpperCase()] || instrumentSubType;
+      if (!REPORT_INSTRUMENT_SUBTYPE[instrumentSubType.toUpperCase()]) notes.add(`instrument sub type "${instrumentSubType}"`);
       const { baseRate, tenor } = parseBaseRateIndex(get(r, 'baseRateIndexName'));
       const funded = contractType === 'Funded';
       const payFreq = funded ? (REPORT_PAYMENTS[Number(payments)] || (payments ? `${payments} per year` : '')) : '';

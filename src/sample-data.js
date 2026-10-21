@@ -251,7 +251,7 @@
         legalEntityName: r.AssetName.replace(/ (TLB?|RCF|DDTL|PIK TL)$/, ''),
         positionId: `POS-${r.AllVuePortfolio}-${r.AssetID}`, referenceAccrualId: r.ContractID,
         accrualType: funded ? 'Funded' : r.FacilityType === 'DDTL' ? 'Delayed Draw Unfunded' : 'Unfunded',
-        instrumentType: FACILITY_NAME[r.FacilityType],
+        instrumentSubType: FACILITY_NAME[r.FacilityType],
         baseRateIndexName: funded ? `${r.Tenor} SOFR Term` : '',
         rateType: funded ? (r.RateType === 'Fixed' ? 'Fixed' : 'Float') : '',
         interestPaymentType: funded ? r.InterestType : '',

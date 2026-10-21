@@ -78,7 +78,7 @@ The AllVue prior and current slots take the **AllVue contracts report as-is** (o
 | `primaryIdentifier` | Facility (asset) | Keys the tranche map; stored in PAM's alternative ID table |
 | `referenceAccrualId` | Contract | Linked to PAM contracts through the lineage table |
 | `accrualType` | Contract kind | Funded; Unfunded and Delayed Draw Unfunded → unfunded; Letter of Credit → counts toward the commitment only; % of Funded → ignored |
-| `instrumentType` | Facility type | Term Loan TL, Revolver RC, Delayed Draw DDTL |
+| `instrumentSubType` | Facility type | Term Loan TL, Revolver RC, Delayed Draw DDTL |
 | `baseRateIndexName` | Base rate, tenor | `1M SOFR Term` → SOFR 1M; reset frequency comes from the tenor |
 | `rateType`, `interestPaymentType` | Rate type, interest type | Float → Floating; Cash / Capitalize |
 | `spread`, `spreadAdjustment` | Margin (bps) | Decimals × 10,000. The adjustment is added to the PAM spread when the Setup setting is on |
