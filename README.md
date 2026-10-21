@@ -74,7 +74,8 @@ The AllVue prior and current slots take the **AllVue contracts report as-is** (o
 
 | Report column | App field | Conversion |
 |---|---|---|
-| `portfolioId` | AllVue portfolio | Keys the portfolio map |
+| `portfolioId` | AllVue portfolio | Keys the portfolio map. `portfolioName` is shown in the app |
+| `legalEntityName`, `instrumentName` | Issuer, instrument | Shown as the asset name (issuer over instrument); fees borrow them by facility ID |
 | `primaryIdentifier` | Facility (asset) | Keys the tranche map; stored in PAM's alternative ID table |
 | `referenceAccrualId` | Contract | Linked to PAM contracts through the lineage table |
 | `accrualType` | Contract kind | Funded; Unfunded and Delayed Draw Unfunded → unfunded; Letter of Credit → counts toward the commitment only; % of Funded → ignored |

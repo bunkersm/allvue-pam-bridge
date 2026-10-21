@@ -176,6 +176,9 @@
         allvuePortfolio: String(r.AllVuePortfolio || '').trim(),
         assetId: String(r.AssetID || '').trim(),
         assetName: String(r.AssetName || r.AssetID || '').trim(),
+        // Display names (optional): AllVue portfolioName and legalEntityName.
+        portfolioName: String(r.PortfolioName || '').trim(),
+        issuerName: String(r.IssuerName || '').trim(),
         facilityType: String(r.FacilityType || '').trim().toUpperCase(),
         contractId: String(r.ContractID || '').trim(),
         unfunded: kind === 'unfunded',
@@ -267,7 +270,9 @@
         AsOfDate: asOfDate,
         AllVuePortfolio: get(r, 'portfolioId'),
         AssetID: get(r, 'primaryIdentifier'),
-        AssetName: get(r, 'instrumentName') || get(r, 'legalEntityName') || get(r, 'primaryIdentifier'),
+        AssetName: get(r, 'instrumentName') || get(r, 'primaryIdentifier'),
+        IssuerName: get(r, 'legalEntityName'),
+        PortfolioName: get(r, 'portfolioName'),
         FacilityType: facilityType,
         ContractID: get(r, 'referenceAccrualId'),
         ContractType: contractType || 'Other',
@@ -473,13 +478,19 @@
       if (ev) events.push(ev);
     }
     events.sort((a, b) => ROUTE_ORDER[a.route] - ROUTE_ORDER[b.route]
-      || a.assetName.localeCompare(b.assetName) || a.allvuePortfolio.localeCompare(b.allvuePortfolio));
+      || displayName(a).localeCompare(displayName(b)) || a.allvuePortfolio.localeCompare(b.allvuePortfolio));
     return events;
   }
+
+  /** Issuer and instrument, e.g. "Granite Peak Services Term Loan B". */
+  const displayName = ev => [ev.issuerName, ev.assetName].filter(Boolean).join(' ');
 
   function classifyGroup(g, ctx) {
     const head = g.current[0] || g.prior[0];
     const { allvuePortfolio, assetId, assetName, facilityType } = head;
+    const named = k => (g.current.find(r => r[k]) || g.prior.find(r => r[k]) || {})[k] || '';
+    const portfolioName = named('portfolioName');
+    const issuerName = named('issuerName');
 
     const priorFunded = g.prior.filter(r => r.kind === 'funded');
     const currentFunded = g.current.filter(r => r.kind === 'funded');
@@ -738,7 +749,7 @@
     const lineageUpdates = plan.lineage;
 
     return {
-      key, allvuePortfolio, assetId, assetName, facilityType, effectiveDate,
+      key, allvuePortfolio, portfolioName, assetId, assetName, issuerName, facilityType, effectiveDate,
       type, typeLabel: TYPE_LABELS[type], legs, route, flags,
       expired, added, amended, unchanged, rollTermChanges,
       totals: { fundedBefore, fundedAfter, fundedDelta, bookedDelta, unfundedBefore, unfundedAfter, commitmentBefore, commitmentAfter, globalBefore, globalAfter, globalDelta },
@@ -1206,7 +1217,7 @@
     const warnings = [];
     if (today) {
       events.forEach(ev => ev.messages.filter(m => m.level === 'PORTFOLIO' && (m.type === 'PAYDOWN' || m.type === 'DRAW') && m.effectiveDate > today)
-        .slice(0, 1).forEach(m => warnings.push(`${ev.assetName}: ${m.type === 'PAYDOWN' ? 'redemption' : 'drawdown'} dated ${m.effectiveDate} is after today (${today}); PAM rejects future-dated ${m.type === 'PAYDOWN' ? 'redemptions' : 'drawdowns'}.`)));
+        .slice(0, 1).forEach(m => warnings.push(`${displayName(ev)}: ${m.type === 'PAYDOWN' ? 'redemption' : 'drawdown'} dated ${m.effectiveDate} is after today (${today}); PAM rejects future-dated ${m.type === 'PAYDOWN' ? 'redemptions' : 'drawdowns'}.`)));
     }
     events.forEach(ev => ev.messages.filter(m => m.level === 'SMF').forEach(m => m.contractIds.forEach(id => {
       if (seen.has(id)) errors.push(`Contract ${id} is created by both ${seen.get(id)} and ${ev.key}.`);
@@ -1349,7 +1360,7 @@
     parseCSV, toCSV, missingColumns,
     toCents, fromCents, formatMoney, normalizeDate, daysBetween,
     normalizeAllVue, normalizeTrancheMap, normalizePortfolioMap, normalizePamPositions, normalizeLineage,
-    allocate, detectEvents, buildBatchRows, checkRunDates, firstScheduledPayDate,
+    allocate, detectEvents, buildBatchRows, checkRunDates, firstScheduledPayDate, displayName,
     FEE_TOLERANCE, FEE_POSITION_DRIFT, normalizeFees, expectedFee, checkFees,
     REPORT_REQUIRED, REPORT_OPTIONAL, isAllVueReport, missingReportColumns, parseBaseRateIndex, fromAllVueReport,
     PAM, normalizePortfolioAccounts, pamMessageNode, pamMessageText, manualStepText, buildPamFile,

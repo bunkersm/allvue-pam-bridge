@@ -146,6 +146,14 @@
 
   const money = n => n.toFixed(2);
 
+  // Display names: AllVue portfolioName, legalEntityName (issuer) and instrumentName.
+  const PORTFOLIO_NAMES = { 'LOANS-MASTER': 'Loans Master Fund', 'CLO-MASTER': 'CLO Master Portfolio' };
+  const INSTRUMENT = { TLB: 'Term Loan B', TL: 'Term Loan', RCF: 'Revolving Credit Facility', DDTL: 'Delayed Draw Term Loan', 'PIK TL': 'PIK Term Loan' };
+  function names(a) {
+    const m = a.name.match(/^(.*) (PIK TL|TLB|TL|RCF|DDTL)$/);
+    return { issuer: m ? m[1] : a.name, instrument: m ? INSTRUMENT[m[2]] : a.name };
+  }
+
   function allvueRows(side) {
     const asOf = side === 'prior' ? PRIOR_AS_OF : AS_OF;
     const rows = [];
@@ -157,7 +165,11 @@
       // Your share of the facility; the global amount is your amount grossed up by it.
       const share = a.share || (a.port === 'CLO-MASTER' ? 0.02 : 0.04);
       const global = amount => Math.round(amount * 100 / share) / 100;
-      const base = { AsOfDate: asOf, AllVuePortfolio: a.port, AssetID: a.id, AssetName: a.name, FacilityType: a.fac, Commitment: money(commitment) };
+      const n = names(a);
+      const base = {
+        AsOfDate: asOf, AllVuePortfolio: a.port, PortfolioName: PORTFOLIO_NAMES[a.port], AssetID: a.id,
+        AssetName: n.instrument, IssuerName: n.issuer, FacilityType: a.fac, Commitment: money(commitment),
+      };
       contracts.forEach(c => rows.push({
         ...base, ContractID: c.id, ContractType: 'Funded', StartDate: c.period[0], EndDate: c.period[1],
         Amount: money(c.amount), GlobalAmount: money(c.global ?? global(c.amount)),
@@ -246,9 +258,9 @@
     return rows.map(r => {
       const funded = r.ContractType === 'Funded';
       return {
-        portfolioId: r.AllVuePortfolio, portfolioName: `${r.AllVuePortfolio} (sample)`,
+        portfolioId: r.AllVuePortfolio, portfolioName: r.PortfolioName,
         instrumentId: `INST-${r.AssetID}`, primaryIdentifier: r.AssetID, instrumentName: r.AssetName,
-        legalEntityName: r.AssetName.replace(/ (TLB?|RCF|DDTL|PIK TL)$/, ''),
+        legalEntityName: r.IssuerName,
         positionId: `POS-${r.AllVuePortfolio}-${r.AssetID}`, referenceAccrualId: r.ContractID,
         accrualType: funded ? 'Funded' : r.FacilityType === 'DDTL' ? 'Delayed Draw Unfunded' : 'Unfunded',
         instrumentSubType: FACILITY_NAME[r.FacilityType],

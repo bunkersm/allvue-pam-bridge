@@ -6,7 +6,7 @@
   'use strict';
   const E = window.Engine;
   const S = window.SampleData;
-  const STORE_KEY = 'loan-event-bridge:v7';
+  const STORE_KEY = 'loan-event-bridge:v8';
 
   const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const money = E.formatMoney;
@@ -119,9 +119,39 @@
   const feeByKey = key => state.fees.find(f => f.key === key);
   const itemByKey = key => eventByKey(key) || feeByKey(key);
   const periodText = f => `${f.periodStart} to ${f.periodEnd}`;
+  // Display names. Fees borrow the portfolio and issuer names from the contract data.
+  let nameIndex = null;
+  function names() {
+    if (nameIndex) return nameIndex;
+    nameIndex = { portfolios: {}, issuers: {} };
+    try {
+      [...(state.inputs.prior || []), ...(state.inputs.current || [])].forEach(r => {
+        if (r.PortfolioName) nameIndex.portfolios[r.AllVuePortfolio] = r.PortfolioName;
+        if (r.IssuerName) nameIndex.issuers[r.AssetID] = { issuer: r.IssuerName, instrument: r.AssetName };
+      });
+    } catch { /* names are optional */ }
+    return nameIndex;
+  }
+  const portfolioName = item => item.portfolioName || names().portfolios[item.allvuePortfolio] || item.allvuePortfolio;
+  const issuerOf = item => item.issuerName || (names().issuers[item.assetId] || {}).issuer || '';
+  const instrumentOf = item => (item.issuerName ? item.assetName : (names().issuers[item.assetId] || {}).instrument) || item.assetName;
+  const assetTitle = item => [issuerOf(item), instrumentOf(item)].filter(Boolean).join(' ');
   const eventLabel = ev => ev.kind === 'fee'
-    ? `${ev.feeType}, ${ev.assetName} (${ev.allvuePortfolio}), ${periodText(ev)}`
-    : `${ev.typeLabel}, ${ev.assetName} (${ev.allvuePortfolio})`;
+    ? `${ev.feeType}, ${assetTitle(ev)} (${portfolioName(ev)}), ${periodText(ev)}`
+    : `${ev.typeLabel}, ${assetTitle(ev)} (${portfolioName(ev)})`;
+
+  /** Issuer over instrument, with the facility ID and type underneath. */
+  function assetCell(item) {
+    const issuer = issuerOf(item);
+    return `${issuer ? `<div>${esc(issuer)}</div><div class="small">${esc(instrumentOf(item))}</div>` : esc(item.assetName)}<div class="muted small"><span class="mono">${esc(item.assetId)}</span> · ${esc(item.facilityType)}</div>`;
+  }
+
+  function portfolioCell(item) {
+    const name = portfolioName(item);
+    return name !== item.allvuePortfolio
+      ? `<div>${esc(name)}</div><div class="muted small mono">${esc(item.allvuePortfolio)}</div>`
+      : `<span class="mono">${esc(item.allvuePortfolio)}</span>`;
+  }
 
   function log(action, ref, label, note) {
     state.audit.unshift({ at: now(), user: state.user || 'Unknown user', action, ref: ref || '', label: label || '', note: note || '' });
@@ -453,7 +483,7 @@
     const rows = state.events.filter(ev => {
       if (state.filter !== 'all' && STATUS[statusOf(ev)].group !== state.filter) return false;
       if (!q) return true;
-      const hay = [ev.assetName, ev.assetId, ev.allvuePortfolio, ev.typeLabel, ...ev.expired.map(c => c.contractId), ...ev.added.map(c => c.contractId), ...ev.amended.map(a => a.cur.contractId)].join(' ').toLowerCase();
+      const hay = [ev.assetName, issuerOf(ev), portfolioName(ev), ev.assetId, ev.allvuePortfolio, ev.typeLabel, ...ev.expired.map(c => c.contractId), ...ev.added.map(c => c.contractId), ...ev.amended.map(a => a.cur.contractId)].join(' ').toLowerCase();
       return hay.includes(q);
     });
     if (!rows.length) {
@@ -469,9 +499,9 @@
           <td>${chip(st)}</td>
           <td><span class="type">${esc(ev.typeLabel)}</span> ${ev.legs.map(l => `<span class="tag">+ ${esc(E.TYPE_LABELS[l].toLowerCase())}</span>`).join(' ')}
             ${st === 'failed' && info.error ? `<div class="small" style="color:var(--bad)">${esc(info.error)}</div>` : ''}</td>
-          <td>${esc(ev.assetName)}<div class="muted small"><span class="mono">${esc(ev.assetId)}</span> · ${esc(ev.facilityType)}</div></td>
-          <td class="mono">${esc(ev.allvuePortfolio)}</td>
-          <td class="mono">${esc(ev.effectiveDate)}</td>
+          <td>${assetCell(ev)}</td>
+          <td>${portfolioCell(ev)}</td>
+          <td class="mono nowrap">${esc(ev.effectiveDate)}</td>
           <td class="mono">${esc(contractsSummary(ev))}</td>
           <td class="num">${deltaCell(ev.totals.fundedDelta)}</td>
           <td class="num">${fileMsgs(ev).length || '<span class="muted">0</span>'}</td>
@@ -651,7 +681,7 @@
       <aside class="drawer" role="dialog" aria-modal="true" aria-label="${esc(eventLabel(ev))}">
         <header class="drawer-head">
           <div class="title-row">
-            <div><div class="eyebrow">${esc(ev.typeLabel)} · ${esc(ev.facilityType)} · ${esc(ev.allvuePortfolio)}</div><h2>${esc(ev.assetName)}</h2></div>
+            <div><div class="eyebrow">${esc(ev.typeLabel)} · ${esc(ev.facilityType)} · ${esc(portfolioName(ev))}</div><h2>${esc(issuerOf(ev) || ev.assetName)}</h2>${issuerOf(ev) ? `<div class="small muted">${esc(instrumentOf(ev))} · <span class="mono">${esc(ev.assetId)}</span></div>` : ''}</div>
             <button class="btn" data-action="close" id="drawer-close">Close</button>
           </div>
           <div class="row">${chip(statusOf(ev))} ${ev.legs.map(l => `<span class="tag">+ ${esc(E.TYPE_LABELS[l].toLowerCase())}</span>`).join(' ')} <span class="small muted">Effective <span class="mono">${esc(ev.effectiveDate)}</span></span></div>
@@ -660,7 +690,7 @@
           <section><p>${describe(ev)}</p></section>
           ${ev.flags.length ? `<section><h3>Checks</h3><ul class="flags">${ev.flags.map(f => `<li class="flag ${f.level}"><b>${flagLabel[f.level]}.</b>${esc(f.text)}</li>`).join('')}</ul></section>` : ''}
           <section><h3>AllVue contracts</h3>${contractTable(ev)}<p class="small muted">Highlighted cells differ from the expiring contract, or show an irregular period length.</p></section>
-          <section><h3>Tranche totals in ${esc(ev.allvuePortfolio)}</h3>
+          <section><h3>Tranche totals in ${esc(portfolioName(ev))}</h3>
             <dl class="kv">
               <div><dt>Funded</dt><dd class="figure">${money(t.fundedBefore)} → ${money(t.fundedAfter)}</dd><dd class="small">${deltaCell(t.fundedDelta)}</dd></div>
               <div><dt>Unfunded</dt><dd class="figure">${money(t.unfundedBefore)} → ${money(t.unfundedAfter)}</dd></div>
@@ -697,9 +727,9 @@
         const info = statusInfo(f);
         return `<tr class="clickable${state.selectedKey === f.key ? ' selected' : ''}" data-key="${esc(f.key)}" tabindex="0">
           <td>${chip(st)}${st === 'failed' && info.error ? `<div class="small" style="color:var(--bad)">${esc(info.error)}</div>` : ''}</td>
-          <td>${esc(f.assetName)}<div class="muted small"><span class="mono">${esc(f.assetId)}</span> · ${esc(f.facilityType)}</div></td>
+          <td>${assetCell(f)}</td>
           <td>${esc(f.feeType)}</td>
-          <td class="mono">${esc(f.allvuePortfolio)}</td>
+          <td>${portfolioCell(f)}</td>
           <td class="mono nowrap">${esc(f.periodStart)} → ${esc(f.periodEnd)}</td>
           <td class="num">${esc(f.rateBps)}</td>
           <td class="num">${money(f.avgUnfunded)}</td>
@@ -757,7 +787,7 @@
       <aside class="drawer" role="dialog" aria-modal="true" aria-label="${esc(eventLabel(f))}">
         <header class="drawer-head">
           <div class="title-row">
-            <div><div class="eyebrow">${esc(f.feeType)} · ${esc(f.facilityType)} · ${esc(f.allvuePortfolio)}</div><h2>${esc(f.assetName)}</h2></div>
+            <div><div class="eyebrow">${esc(f.feeType)} · ${esc(f.facilityType)} · ${esc(portfolioName(f))}</div><h2>${esc(issuerOf(f) || f.assetName)}</h2>${issuerOf(f) ? `<div class="small muted">${esc(instrumentOf(f))} · <span class="mono">${esc(f.assetId)}</span></div>` : ''}</div>
             <button class="btn" data-action="close" id="drawer-close">Close</button>
           </div>
           <div class="row">${chip(statusOf(f))} <span class="small muted">Export row ${f.rowNo} · <span class="mono">${esc(f.transactionId)}</span></span></div>
@@ -967,6 +997,7 @@
   // ------------------------------------------------------------------ render
 
   function render() {
+    nameIndex = null;
     renderTabs();
     const main = document.getElementById('main');
     const views = { queue: viewQueue, fees: viewFees, batches: viewBatches, setup: viewSetup, audit: viewAudit };

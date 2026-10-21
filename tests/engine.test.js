@@ -568,3 +568,14 @@ test('report: the sample report files give exactly the same events and PAM messa
     sig(E.detectEvents({ ...ctx, prior: E.normalizeAllVue(a.rows), current: E.normalizeAllVue(b.rows) })),
     sig(detectSample()));
 });
+
+test('report: portfolio name, issuer (legalEntityName) and instrument name carry through to events', () => {
+  const prior = E.fromAllVueReport([reportRow({ '[portfolioName]': 'Sample Fund I', '[legalEntityName]': 'Sample Issuer LLC', '[instrumentName]': 'Term Loan B' })], { asOfDate: '2026-11-13' }).rows;
+  const current = E.fromAllVueReport([reportRow({ '[portfolioName]': 'Sample Fund I', '[legalEntityName]': 'Sample Issuer LLC', '[instrumentName]': 'Term Loan B',
+    '[referenceAccrualId]': 'AC0002', '[beginDate]': '2026-11-16', '[endDate]': '2026-12-16' })], { asOfDate: '2026-11-16' }).rows;
+  const [ev] = E.detectEvents({ asOfDate: '2026-11-16', prior: E.normalizeAllVue(prior), current: E.normalizeAllVue(current), trancheMap: {}, portfolioMap: {}, pamPositions: [], lineage: { AC0001: 'PC1' } });
+  assert.equal(ev.portfolioName, 'Sample Fund I');
+  assert.equal(ev.issuerName, 'Sample Issuer LLC');
+  assert.equal(ev.assetName, 'Term Loan B');
+  assert.equal(E.displayName(ev), 'Sample Issuer LLC Term Loan B');
+});
