@@ -12,7 +12,10 @@ Open work and questions for Loan Event Bridge, roughly in priority order.
 - [ ] **Confirm PAM can produce holdings as of a past date** (e.g. as of Friday 10/16 when pulled on Tuesday 10/20, after the trade feed has posted Monday's trades).
 - [ ] **Confirm PAM accepts messages effective the previous business day** (every file is back-dated by one business day, three after a weekend).
 - [ ] **PAM code translations.** Confirm every AllVue → PAM code in `docs/pam-code-translations.csv`, then load that file in the app instead of the codes built into `src/engine.js`.
-- [ ] **Real AllVue contract export headers** (with dummy rows) to replace the assumed column names.
+- [x] AllVue contracts report loads as-is (see README).
+- [ ] **AllVue report questions:** what "% of Funded" accrual rows are (ignored today); whether letters of credit need anything in PAM; PAM codes for weekly pay (52), ACT/ACT day counts and Prime; whether a 1M SOFR contract that pays quarterly has monthly or quarterly accrual periods in AllVue (affects the pay day and accrual month sent to PAM).
+- [ ] **Spread adjustment:** decide whether PAM's spread is always `spread + spreadAdjustment` (a Setup setting, on by default).
+- [ ] **PAM contract ID length:** AllVue accrual IDs are 24-character hex strings. Confirm PAM accepts them as contract security IDs, or decide how PAM numbers new contracts.
 - [ ] **AllVue fee export and PAM fee transaction file layouts** for the fee pilot.
 
 ## PAM message formats still needed

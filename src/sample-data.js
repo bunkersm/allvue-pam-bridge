@@ -239,7 +239,36 @@
     return rows;
   }
 
+  /** The internal sample rows as an AllVue contracts report (made-up IDs). */
+  const FACILITY_NAME = { TL: 'Term Loan', RC: 'Revolver', DDTL: 'Delayed Draw' };
+  const PAYMENTS = { Monthly: 12, Quarterly: 4, 'Semi-Annual': 2, Annual: 1 };
+  function toAllVueReport(rows) {
+    return rows.map(r => {
+      const funded = r.ContractType === 'Funded';
+      return {
+        portfolioId: r.AllVuePortfolio, portfolioName: `${r.AllVuePortfolio} (sample)`,
+        instrumentId: `INST-${r.AssetID}`, primaryIdentifier: r.AssetID, instrumentName: r.AssetName,
+        legalEntityName: r.AssetName.replace(/ (TLB?|RCF|DDTL|PIK TL)$/, ''),
+        positionId: `POS-${r.AllVuePortfolio}-${r.AssetID}`, referenceAccrualId: r.ContractID,
+        accrualType: funded ? 'Funded' : r.FacilityType === 'DDTL' ? 'Delayed Draw Unfunded' : 'Unfunded',
+        instrumentType: FACILITY_NAME[r.FacilityType],
+        baseRateIndexName: funded ? `${r.Tenor} SOFR Term` : '',
+        rateType: funded ? (r.RateType === 'Fixed' ? 'Fixed' : 'Float') : '',
+        interestPaymentType: funded ? r.InterestType : '',
+        spread: funded ? String(Number(r.MarginBps) / 10000) : '',
+        spreadAdjustment: funded ? '0' : '',
+        rateFloor: funded ? String(Number(r.FloorPct) / 100) : '',
+        rateCeiling: '',
+        dayCount: funded ? 'ACT/360' : '',
+        numPaymentsPerYear: funded ? String(PAYMENTS[r.PayFreq]) : '',
+        beginDate: r.StartDate, endDate: r.EndDate,
+        accrualAmount: r.Amount, globalAccrualAmount: r.GlobalAmount,
+      };
+    });
+  }
+
   const SampleData = {
+    toAllVueReport,
     label: 'Sample month-end (fictional data)',
     feeLabel: 'October 2026 fee export (fictional data)',
     asOfDate: AS_OF,

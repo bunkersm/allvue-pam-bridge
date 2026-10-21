@@ -160,17 +160,25 @@
 
   // ---------------------------------------------------------------- normalizing inputs
 
-  function normalizeAllVue(rows) {
+  /**
+   * Internal contract rows. Optional columns: SpreadAdjBps (added to the margin
+   * when addSpreadAdjustment is on, since PAM can't hold a base rate adjustment),
+   * CapPct, AllInRate.
+   */
+  function normalizeAllVue(rows, { addSpreadAdjustment = true } = {}) {
     return rows.map(r => {
       const contractType = String(r.ContractType || '').trim().toLowerCase();
+      const kind = contractType.startsWith('unfund') ? 'unfunded' : contractType === 'lc' ? 'lc' : contractType === 'other' ? 'other' : 'funded';
+      const spreadAdjBps = Number(r.SpreadAdjBps || 0);
       return {
+        kind,
         asOfDate: normalizeDate(r.AsOfDate),
         allvuePortfolio: String(r.AllVuePortfolio || '').trim(),
         assetId: String(r.AssetID || '').trim(),
         assetName: String(r.AssetName || r.AssetID || '').trim(),
         facilityType: String(r.FacilityType || '').trim().toUpperCase(),
         contractId: String(r.ContractID || '').trim(),
-        unfunded: contractType.startsWith('unfund'),
+        unfunded: kind === 'unfunded',
         startDate: normalizeDate(r.StartDate),
         endDate: normalizeDate(r.EndDate),
         amount: toCents(r.Amount),
@@ -180,13 +188,117 @@
         interestType: String(r.InterestType || '').trim(),
         baseRate: String(r.BaseRate || '').trim(),
         tenor: String(r.Tenor || '').trim().toUpperCase(),
-        marginBps: Number(r.MarginBps || 0),
+        marginBps: round3(Number(r.MarginBps || 0) + (addSpreadAdjustment ? spreadAdjBps : 0)),
+        spreadAdjBps,
         floorPct: Number(r.FloorPct || 0),
+        capPct: Number(r.CapPct || 0),
+        allInRate: r.AllInRate === undefined || r.AllInRate === '' ? null : Number(r.AllInRate),
         payFreq: String(r.PayFreq || '').trim(),
         resetFreq: String(r.ResetFreq || '').trim(),
         dayCount: String(r.DayCount || '').trim(),
       };
     });
+  }
+
+  const round3 = n => Math.round(n * 1000) / 1000;
+
+  // ---------------------------------------------------------------- AllVue contracts report
+
+  // The AllVue contracts report, one row per portfolio, facility and accrual (contract).
+  // Headers are matched without brackets or case.
+  const REPORT_REQUIRED = ['portfolioId', 'instrumentId', 'primaryIdentifier', 'referenceAccrualId', 'accrualType', 'instrumentType',
+    'baseRateIndexName', 'rateType', 'interestPaymentType', 'spread', 'spreadAdjustment', 'rateFloor', 'dayCount',
+    'numPaymentsPerYear', 'beginDate', 'endDate', 'accrualAmount', 'globalAccrualAmount'];
+  const REPORT_OPTIONAL = ['portfolioName', 'legalEntityId', 'legalEntityName', 'instrumentName', 'positionId', 'baseRate',
+    'rateCeiling', 'allInRate', 'instrumentOriginalGlobalAmount'];
+  const REPORT_ACCRUAL_TYPE = { FUNDED: 'Funded', UNFUNDED: 'Unfunded', 'DELAYED DRAW UNFUNDED': 'Unfunded', 'LETTER OF CREDIT': 'LC', '% OF FUNDED': 'Other' };
+  const REPORT_INSTRUMENT_TYPE = { 'TERM LOAN': 'TL', REVOLVER: 'RC', 'DELAYED DRAW': 'DDTL' };
+  const REPORT_RATE_TYPE = { FLOAT: 'Floating', FLOATING: 'Floating', FIXED: 'Fixed' };
+  const REPORT_PAYMENTS = { 1: 'Annual', 2: 'Semi-Annual', 4: 'Quarterly', 12: 'Monthly', 52: 'Weekly' };
+  const REPORT_DAY_COUNT = { 'ACT/360': 'ACT/360', 'ACT/365 (FIXED)': 'ACT/365', 'ACT/365': 'ACT/365', '30U/360': '30/360', '30/360': '30/360' };
+  const TENOR_RESET = { '1M': 'Monthly', '3M': 'Quarterly', '6M': 'Semi-Annual', '12M': 'Annual' };
+
+  const headerKey = h => String(h).replace(/[[\]\s]/g, '').toLowerCase();
+
+  function isAllVueReport(headers) {
+    return (headers || []).some(h => headerKey(h) === 'referenceaccrualid');
+  }
+
+  function missingReportColumns(headers) {
+    const have = new Set((headers || []).map(headerKey));
+    return REPORT_REQUIRED.filter(c => !have.has(c.toLowerCase()));
+  }
+
+  /** "1M SOFR Term" -> SOFR / 1M; "Prime" -> PRIME with no tenor. */
+  function parseBaseRateIndex(name) {
+    const s = String(name || '').trim();
+    const t = s.match(/(\d+)\s*M\b/i);
+    const base = /SOFR/i.test(s) ? 'SOFR' : s.replace(/(\d+)\s*M\b/i, '').replace(/\bTERM\b/i, '').trim().toUpperCase();
+    return { baseRate: base, tenor: t ? `${t[1]}M` : '' };
+  }
+
+  const pct = v => (v === undefined || String(v).trim() === '' ? 0 : Number(v));
+
+  /**
+   * Converts the AllVue contracts report into the app's contract rows. Rates in
+   * the report are decimals (0.05 = 5%). Returns { rows, notes }; notes list
+   * values that were not recognised.
+   */
+  function fromAllVueReport(reportRows, { asOfDate }) {
+    const notes = new Set();
+    const get = (r, k) => {
+      const key = Object.keys(r).find(x => headerKey(x) === k.toLowerCase());
+      return key === undefined ? '' : String(r[key] ?? '').trim();
+    };
+    const rows = reportRows.map(r => {
+      const accrualType = get(r, 'accrualType');
+      const instrumentType = get(r, 'instrumentType');
+      const rateType = get(r, 'rateType');
+      const dayCount = get(r, 'dayCount');
+      const payments = get(r, 'numPaymentsPerYear');
+      const contractType = REPORT_ACCRUAL_TYPE[accrualType.toUpperCase()];
+      if (!contractType) notes.add(`accrual type "${accrualType}" (row ignored)`);
+      const facilityType = REPORT_INSTRUMENT_TYPE[instrumentType.toUpperCase()] || instrumentType;
+      if (!REPORT_INSTRUMENT_TYPE[instrumentType.toUpperCase()]) notes.add(`instrument type "${instrumentType}"`);
+      const { baseRate, tenor } = parseBaseRateIndex(get(r, 'baseRateIndexName'));
+      const funded = contractType === 'Funded';
+      const payFreq = funded ? (REPORT_PAYMENTS[Number(payments)] || (payments ? `${payments} per year` : '')) : '';
+      return {
+        AsOfDate: asOfDate,
+        AllVuePortfolio: get(r, 'portfolioId'),
+        AssetID: get(r, 'primaryIdentifier'),
+        AssetName: get(r, 'instrumentName') || get(r, 'legalEntityName') || get(r, 'primaryIdentifier'),
+        FacilityType: facilityType,
+        ContractID: get(r, 'referenceAccrualId'),
+        ContractType: contractType || 'Other',
+        StartDate: get(r, 'beginDate'),
+        EndDate: get(r, 'endDate'),
+        Amount: get(r, 'accrualAmount') || '0',
+        GlobalAmount: get(r, 'globalAccrualAmount') || '0',
+        Commitment: '', // filled in below from the funded, unfunded and LC rows
+        RateType: funded ? (REPORT_RATE_TYPE[rateType.toUpperCase()] || rateType) : '',
+        InterestType: funded ? get(r, 'interestPaymentType') : '',
+        BaseRate: funded && REPORT_RATE_TYPE[rateType.toUpperCase()] !== 'Fixed' ? baseRate : '',
+        Tenor: funded ? tenor : '',
+        MarginBps: funded ? String(round3(pct(get(r, 'spread')) * 10000)) : '',
+        SpreadAdjBps: funded ? String(round3(pct(get(r, 'spreadAdjustment')) * 10000)) : '',
+        FloorPct: funded ? String(round3(pct(get(r, 'rateFloor')) * 100)) : '',
+        CapPct: funded ? String(round3(pct(get(r, 'rateCeiling')) * 100)) : '',
+        AllInRate: get(r, 'allInRate'),
+        PayFreq: payFreq,
+        ResetFreq: funded ? (TENOR_RESET[tenor] || payFreq) : '',
+        DayCount: funded ? (REPORT_DAY_COUNT[dayCount.toUpperCase()] || dayCount) : '',
+      };
+    });
+    // Commitment per portfolio and facility = funded + unfunded + letters of credit.
+    const totals = new Map();
+    rows.forEach(r => {
+      if (!['Funded', 'Unfunded', 'LC'].includes(r.ContractType)) return;
+      const k = `${r.AllVuePortfolio}|${r.AssetID}`;
+      totals.set(k, (totals.get(k) || 0) + toCents(r.Amount));
+    });
+    rows.forEach(r => { r.Commitment = fromCents(totals.get(`${r.AllVuePortfolio}|${r.AssetID}`) || 0); });
+    return { rows, notes: [...notes] };
   }
 
   function normalizeTrancheMap(rows) {
@@ -369,8 +481,9 @@
     const head = g.current[0] || g.prior[0];
     const { allvuePortfolio, assetId, assetName, facilityType } = head;
 
-    const priorFunded = g.prior.filter(r => !r.unfunded);
-    const currentFunded = g.current.filter(r => !r.unfunded);
+    const priorFunded = g.prior.filter(r => r.kind === 'funded');
+    const currentFunded = g.current.filter(r => r.kind === 'funded');
+    const lcAfter = sum(g.current.filter(r => r.kind === 'lc'));
     const unfundedBefore = sum(g.prior.filter(r => r.unfunded));
     const unfundedAfter = sum(g.current.filter(r => r.unfunded));
     const commitmentBefore = g.prior.length ? g.prior[0].commitment : 0;
@@ -453,8 +566,11 @@
     if (!tranche) exception(`Asset ${assetId} is not mapped to a PAM tranche. Set the tranche up in PAM and add it to the tranche map.`);
     if (!pamPortfolios.length) exception(`AllVue portfolio ${allvuePortfolio} has no PAM portfolios in the portfolio map.`);
 
-    if (g.current.length && fundedAfter + unfundedAfter !== commitmentAfter) {
-      exception(`Funded ${money(fundedAfter)} plus unfunded ${money(unfundedAfter)} does not equal the commitment of ${money(commitmentAfter)} in the AllVue export.`);
+    if (g.current.length && fundedAfter + unfundedAfter + lcAfter !== commitmentAfter) {
+      exception(`Funded ${money(fundedAfter)} plus unfunded ${money(unfundedAfter)}${lcAfter ? ` plus letters of credit ${money(lcAfter)}` : ''} does not equal the commitment of ${money(commitmentAfter)} in the AllVue export.`);
+    }
+    if (!['TL', 'RC', 'DDTL'].includes(facilityType)) {
+      exception(`Unknown facility type "${facilityType}". Expected Term Loan, Revolver or Delayed Draw.`);
     }
     if (facilityType === 'TL' && unfundedAfter !== 0) {
       exception(`Term loan shows an unfunded amount of ${money(unfundedAfter)}. Term loans should be fully funded.`);
@@ -932,6 +1048,9 @@
       reset_day: coupon_type === 'V' && !noDay ? payDay : '',
       spread_bps: coupon_type === 'V' ? c.marginBps : '',
       min_rate: coupon_type === 'V' ? c.floorPct : '',
+      max_rate: coupon_type === 'V' ? (c.capPct || PAM_CONTRACT_DEFAULTS.max_rate) : PAM_CONTRACT_DEFAULTS.max_rate,
+      pay_freq_name: c.payFreq,
+      day_count_name: c.dayCount,
       interest_type: c.interestType,
       base_rate: c.baseRate,
     };
@@ -949,6 +1068,9 @@
     ['tranche_id', 'contract_id', 'tranche_maturity', 'contract_maturity', 'currency', 'coupon_type', 'coupon_freq', 'dated_type']
       .forEach(k => { if (blank(i[k]) && !(k === 'dated_type' && i[k] === ' ')) errors.push(`${k} is required.`); });
     ['tranche_maturity', 'contract_maturity'].forEach(k => { if (!blank(i[k]) && !isDate(i[k])) errors.push(`${k} "${i[k]}" is not a valid YYYYMMDD date.`); });
+    if (!blank(i.coupon_freq) && !['M', 'Q', 'S', 'A', 'B'].includes(i.coupon_freq)) errors.push(`No PAM coupon frequency code for pay frequency "${i.pay_freq_name || i.coupon_freq}".`);
+    if (!blank(i.day_count) && !['D', 'C', 'A'].includes(i.day_count)) errors.push(`No PAM day count code for "${i.day_count_name || i.day_count}".`);
+    if (i.coupon_type === 'V' && !blank(i.reset_freq) && !['M', 'Q', 'S', 'A'].includes(i.reset_freq)) errors.push(`No PAM reset frequency code for "${i.reset_freq}".`);
     if (isDate(i.tranche_maturity) && isDate(i.contract_maturity) && Number(i.contract_maturity) > Number(i.tranche_maturity)) errors.push('contract_maturity is after tranche_maturity.');
     if (![1, 2, 3].includes(Number(i.loan_type)) || blank(i.loan_type)) errors.push(`loan_type "${i.loan_type}" must be 1, 2 or 3.`);
     if (String(i.payment_type) === '66' || String(i.payment_type) === '83') {
@@ -1229,6 +1351,7 @@
     normalizeAllVue, normalizeTrancheMap, normalizePortfolioMap, normalizePamPositions, normalizeLineage,
     allocate, detectEvents, buildBatchRows, checkRunDates, firstScheduledPayDate,
     FEE_TOLERANCE, FEE_POSITION_DRIFT, normalizeFees, expectedFee, checkFees,
+    REPORT_REQUIRED, REPORT_OPTIONAL, isAllVueReport, missingReportColumns, parseBaseRateIndex, fromAllVueReport,
     PAM, normalizePortfolioAccounts, pamMessageNode, pamMessageText, manualStepText, buildPamFile,
     node, serialize, prettyPrint, assertBalanced, PAM_CONTRACT_DEFAULTS, EXCLUDED_CONTRACT_FIELDS,
     contractAddInput, validateContractAdd, contractAddNode, contractAddMessage,

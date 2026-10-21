@@ -469,3 +469,100 @@ test('split, combine and global action match PAM samples (transaction number bla
     E.pamMessageText({ level: 'GLOBAL', facilityId: 'DUMMYSEC001', effectiveDate: '2026-10-17', actionType: 9, allocs: [{ contractId: 'CNTR0004', units: -100000000 }, { contractId: 'CNTR0002', units: 150000000 }, { contractId: 'CNTR0001', units: -50000000 }] }),
     'BANKLOANACTION(Add,,SecID(3,DUMMYSEC001),20261017,9,,BANKLOANACTIONCONTRACTALLOC(BANKLOANACTIONCONTRACTALLOCREC(ContractSecID(26,CNTR0004),-1000000.000000),BANKLOANACTIONCONTRACTALLOCREC(ContractSecID(26,CNTR0002),1500000.000000),BANKLOANACTIONCONTRACTALLOCREC(ContractSecID(26,CNTR0001),-500000.000000)))');
 });
+
+// ---------------------------------------------------------------- AllVue contracts report
+
+const fs = require('fs');
+const path = require('path');
+const reportRow = over => ({
+  '[portfolioId]': 'PF0001', '[instrumentId]': 'IN0001', '[primaryIdentifier]': '9000001', '[referenceAccrualId]': 'AC0001',
+  '[accrualType]': 'Funded', '[instrumentType]': 'Term Loan', '[baseRateIndexName]': '1M SOFR Term', '[rateType]': 'Float',
+  '[interestPaymentType]': 'Cash', '[spread]': '0.05', '[spreadAdjustment]': '0.0025', '[rateFloor]': '0.01', '[rateCeiling]': '',
+  '[allInRate]': '0.0907457', '[dayCount]': 'ACT/360', '[numPaymentsPerYear]': '4', '[beginDate]': '2026-10-16', '[endDate]': '2026-11-16',
+  '[accrualAmount]': '1000000.00', '[globalAccrualAmount]': '50000000.00', ...over,
+});
+
+test('report: headers match without brackets or case; required columns are checked', () => {
+  const headers = Object.keys(reportRow({}));
+  assert.ok(E.isAllVueReport(headers));
+  assert.deepEqual(E.missingReportColumns(headers), []);
+  assert.deepEqual(E.missingReportColumns(headers.filter(h => h !== '[spread]')), ['spread']);
+  assert.ok(E.isAllVueReport(['portfolioID', 'referenceAccrualID']));
+});
+
+test('report: rates are decimals; pay frequency from payments per year, reset from the SOFR tenor', () => {
+  const { rows, notes } = E.fromAllVueReport([reportRow({})], { asOfDate: '2026-10-16' });
+  assert.deepEqual(notes, []);
+  const r = rows[0];
+  assert.equal(r.MarginBps, '500');
+  assert.equal(r.SpreadAdjBps, '25');
+  assert.equal(r.FloorPct, '1');
+  assert.equal(r.PayFreq, 'Quarterly');
+  assert.equal(r.ResetFreq, 'Monthly');
+  assert.equal(r.BaseRate, 'SOFR');
+  assert.equal(r.Tenor, '1M');
+  assert.equal(r.FacilityType, 'TL');
+  assert.equal(r.RateType, 'Floating');
+  const [withAdj] = E.normalizeAllVue(rows);
+  const [withoutAdj] = E.normalizeAllVue(rows, { addSpreadAdjustment: false });
+  assert.equal(withAdj.marginBps, 525, 'spread adjustment folded into the PAM spread');
+  assert.equal(withoutAdj.marginBps, 500);
+});
+
+test('report: accrual types, letters of credit in the commitment, % of Funded ignored', () => {
+  const { rows } = E.fromAllVueReport([
+    reportRow({ '[instrumentType]': 'Revolver', '[accrualAmount]': '400000.00' }),
+    reportRow({ '[instrumentType]': 'Revolver', '[accrualType]': 'Unfunded', '[referenceAccrualId]': 'U1', '[accrualAmount]': '500000.00' }),
+    reportRow({ '[instrumentType]': 'Revolver', '[accrualType]': 'Letter of Credit', '[referenceAccrualId]': 'L1', '[accrualAmount]': '100000.00' }),
+    reportRow({ '[instrumentType]': 'Revolver', '[accrualType]': '% of Funded', '[referenceAccrualId]': 'F1', '[accrualAmount]': '1234.00' }),
+    reportRow({ '[instrumentType]': 'Delayed Draw', '[primaryIdentifier]': '9000002', '[accrualType]': 'Delayed Draw Unfunded', '[referenceAccrualId]': 'U2' }),
+  ], { asOfDate: '2026-10-16' });
+  assert.deepEqual(rows.map(r => r.ContractType), ['Funded', 'Unfunded', 'LC', 'Other', 'Unfunded']);
+  assert.ok(rows.slice(0, 4).every(r => r.Commitment === '1000000.00'));
+  const kinds = E.normalizeAllVue(rows).map(r => r.kind);
+  assert.deepEqual(kinds, ['funded', 'unfunded', 'lc', 'other', 'unfunded']);
+});
+
+test('report: unrecognised values are reported, and codes PAM lacks block the contract create', () => {
+  const { notes } = E.fromAllVueReport([reportRow({ '[accrualType]': 'Mystery', '[instrumentType]': 'Bond' })], { asOfDate: '2026-10-16' });
+  assert.equal(notes.length, 2);
+  const base = { ...E.contractAddInput({ ...E.normalizeAllVue(E.fromAllVueReport([reportRow({})], { asOfDate: '2026-10-16' }).rows)[0], pamContractId: 'C1' },
+    { pamTrancheId: 'T1', maturityDate: '2031-01-07', currency: '1' }) };
+  assert.deepEqual(E.validateContractAdd(base).errors, []);
+  const variant = over => {
+    const [c] = E.normalizeAllVue(E.fromAllVueReport([reportRow(over)], { asOfDate: '2026-10-16' }).rows);
+    return E.validateContractAdd(E.contractAddInput({ ...c, pamContractId: 'C1' }, { pamTrancheId: 'T1', maturityDate: '2031-01-07', currency: '1' })).errors;
+  };
+  assert.ok(variant({ '[numPaymentsPerYear]': '52' }).some(e => /pay frequency "Weekly"/.test(e)));
+  assert.ok(variant({ '[dayCount]': 'ACT/ACT (ICMA)' }).some(e => /day count code for "ACT\/ACT \(ICMA\)"/.test(e)));
+  assert.ok(variant({ '[baseRateIndexName]': 'Prime' }).some(e => /base index for base rate "PRIME"/.test(e)));
+  assert.deepEqual(variant({ '[dayCount]': 'ACT/365 (Fixed)' }), []);
+  assert.deepEqual(variant({ '[dayCount]': '30U/360' }), []);
+});
+
+test('report: a change in the spread adjustment between periods is a contract change', () => {
+  const prior = E.fromAllVueReport([reportRow({})], { asOfDate: '2026-11-13' }).rows;
+  const current = E.fromAllVueReport([reportRow({ '[referenceAccrualId]': 'AC0002', '[beginDate]': '2026-11-16', '[endDate]': '2026-12-16', '[spreadAdjustment]': '0.0026' })], { asOfDate: '2026-11-16' }).rows;
+  const run = addSpreadAdjustment => E.detectEvents({
+    asOfDate: '2026-11-16', prior: E.normalizeAllVue(prior, { addSpreadAdjustment }), current: E.normalizeAllVue(current, { addSpreadAdjustment }),
+    trancheMap: {}, portfolioMap: {}, pamPositions: [], lineage: { AC0001: 'PC1' },
+  })[0];
+  assert.equal(run(true).type, 'CONTRACT_CHANGE');
+  assert.deepEqual(run(true).rollTermChanges.map(d => d.field), ['marginBps']);
+  assert.equal(run(false).type, 'ROLLOVER');
+});
+
+test('report: the sample report files give exactly the same events and PAM messages as the sample', () => {
+  const d = SampleData.build();
+  const read = f => E.parseCSV(fs.readFileSync(path.join(__dirname, '..', 'docs', 'samples', f), 'utf8'));
+  const a = E.fromAllVueReport(read('allvue-contracts-report-2026-10-29.csv'), { asOfDate: '2026-10-29' });
+  const b = E.fromAllVueReport(read('allvue-contracts-report-2026-10-30.csv'), { asOfDate: '2026-10-30' });
+  const ctx = {
+    asOfDate: SampleData.asOfDate, trancheMap: E.normalizeTrancheMap(d.trancheMap), portfolioMap: E.normalizePortfolioMap(d.portfolioMap),
+    accounts: E.normalizePortfolioAccounts(d.portfolioMap), pamPositions: E.normalizePamPositions(d.pamPositions), lineage: E.normalizeLineage(d.lineage),
+  };
+  const sig = evs => evs.map(e => [e.key, e.route, e.type, e.messages.filter(m => !m.manual).map(m => E.pamMessageText(m)).join('')].join(' ')).sort();
+  assert.deepEqual(
+    sig(E.detectEvents({ ...ctx, prior: E.normalizeAllVue(a.rows), current: E.normalizeAllVue(b.rows) })),
+    sig(detectSample()));
+});

@@ -52,8 +52,8 @@
   ];
 
   const INPUTS = [
-    { key: 'prior', title: 'AllVue contracts, prior day', layout: 'allvue', desc: 'Contract-level export from the previous business day. Detection compares it with the current day.' },
-    { key: 'current', title: 'AllVue contracts, current day', layout: 'allvue', desc: 'Same export for the day you are processing. Its AsOfDate becomes the run date.' },
+    { key: 'prior', title: 'AllVue contracts, prior day', layout: 'allvue', report: true, desc: 'The AllVue contracts report as of the end of the previous business day, loaded as-is. Detection compares it with the current day.' },
+    { key: 'current', title: 'AllVue contracts, current day', layout: 'allvue', report: true, desc: 'The same report as of the end of the business day you are processing.' },
     { key: 'portfolioMap', title: 'Portfolio map', layout: 'portfolioMap', desc: 'One row per PAM portfolio fed by an AllVue portfolio, with the BNK() details used in its PAM messages: bank, bank name, custody account and cash bank.' },
     { key: 'trancheMap', title: 'Tranche map', layout: 'trancheMap', desc: 'Links each AllVue asset to its PAM facility security ID, with the maturity date and PAM currency code used in contract creates and splits.' },
     { key: 'pamPositions', title: 'PAM holdings', layout: 'pamPositions', desc: 'Funded and unfunded position per PAM portfolio and tranche, as of the same date as the AllVue prior snapshot. Used for tie-out and allocation.' },
@@ -140,8 +140,9 @@
     let events;
     try {
       const i = state.inputs;
-      const prior = E.normalizeAllVue(i.prior);
-      const current = E.normalizeAllVue(i.current);
+      const opts = { addSpreadAdjustment: !(state.settings && state.settings.addSpreadAdjustment === false) };
+      const prior = E.normalizeAllVue(i.prior, opts);
+      const current = E.normalizeAllVue(i.current, opts);
       const dates = E.checkRunDates({ prior, current, pamPositions: E.normalizePamPositions(i.pamPositions) });
       state.dateCheck = dates;
       if (dates.priorDate) state.priorAsOfDate = dates.priorDate;
@@ -870,7 +871,8 @@
       return `<div class="panel panel-pad upload">
         <div class="section-head"><h3>${esc(inp.title)}</h3><span class="small muted">${rows.length} rows loaded</span></div>
         <p class="small">${esc(inp.desc)}</p>
-        <div class="cols">${layout.map(esc).join(', ')}</div>
+        <div class="cols">${inp.report ? `AllVue contracts report: ${E.REPORT_REQUIRED.map(esc).join(', ')} (optional: ${E.REPORT_OPTIONAL.map(esc).join(', ')}). Or the app's own layout: ${layout.map(esc).join(', ')}` : layout.map(esc).join(', ')}</div>
+        ${inp.report ? `<label class="field" for="asof-${inp.key}">As-of date of the report (used when the file name has no date)<input type="date" id="asof-${inp.key}" value="${esc(inp.key === 'prior' ? state.priorAsOfDate : state.asOfDate)}" style="max-width:12rem"></label>` : ''}
         <label class="field" for="file-${inp.key}">Replace with a CSV file<input type="file" id="file-${inp.key}" accept=".csv,text/csv" data-input="${inp.key}"></label>
         <div class="row"><button class="btn ghost" data-action="copyInput" data-input="${inp.key}">Copy current data as CSV</button></div>
       </div>`;
@@ -896,6 +898,15 @@
         <div class="uploads">${cards}</div>
       </section>
       <section class="section">
+        <h2>Settings</h2>
+        <div class="panel panel-pad stack">
+          <label class="row" for="set-spread-adj" style="align-items:flex-start;gap:10px">
+            <input type="checkbox" id="set-spread-adj" ${state.settings && state.settings.addSpreadAdjustment === false ? '' : 'checked'} style="margin-top:3px">
+            <span><b>Add AllVue's spreadAdjustment to the PAM spread.</b><br><span class="small muted">PAM can't hold a base rate adjustment, so it is folded into the spread. A change in the adjustment from one period to the next then becomes a contract change. Re-run detection after changing this.</span></span>
+          </label>
+        </div>
+      </section>
+      <section class="section">
         <h2>Rules in use</h2>
         <div class="panel panel-pad">
           <ul class="rules">
@@ -905,6 +916,7 @@
             <li>A lower funded total is a <b>paydown</b>; a higher one is a <b>draw</b>, or <b>capitalized interest</b> when the contract's interest type is Capitalize or Partial. These are booked after any split or combine.</li>
             <li>PAM message order for each event: <b>create</b> new contracts (security master), then for each step one <b>BANKLOANACTION</b> global action with signed global units per contract, then one <b>TaCONTRACTSPLIT</b> or <b>TaCONTRACTCOMBINE</b> per PAM portfolio. A terms change is a new contract plus a 1:1 split; many → many is a combine then a split. New contracts take the AllVue contract ID.</li>
             <li>New contracts are created with one <b>SMFBANKLOANTRANCHE</b> UPDATE per event (minimal contract add), validated before it goes in the file. Paydowns are <b>TaContractRedemption</b> (one per contract per portfolio) and draws are <b>TaDrawDown</b> (one per portfolio, allocated to the contracts drawn into). No fund may redeem more than its funded holding or draw more than its unfunded. Capitalized interest is a manual step until its PAM format is added.</li>
+            <li><b>AllVue contracts report</b>: rates are decimals (0.05 = 500 bps), the facility key is <code>primaryIdentifier</code>, the contract is <code>referenceAccrualId</code>, pay frequency comes from <code>numPaymentsPerYear</code> and reset frequency from the SOFR tenor. Funded, Unfunded and Delayed Draw Unfunded rows are used; Letter of Credit rows count toward the commitment only; % of Funded rows are ignored.</li>
             <li><b>Dates</b>: PAM holdings must be as of the same date as the AllVue prior snapshot (end of the previous business day), and the AllVue current snapshot must be later. Otherwise detection stops.</li>
             <li><b>Trades</b> are booked in PAM by the trade feed. A position change with no change in the facility's global amount is a trade: nothing is sent. A new position (not in the prior snapshot) is a <b>new purchase</b>: nothing is sent, but an initial long or short first period goes to review. A trade on the same day as a split, combine or terms change goes to review.</li>
             <li>A change that isn't your share of the global change goes to review.</li>
@@ -1076,13 +1088,32 @@
   });
 
   document.addEventListener('change', e => {
+    if (e.target.id === 'set-spread-adj') {
+      state.settings = { ...(state.settings || {}), addSpreadAdjustment: e.target.checked };
+      log('Changed setting', '', 'Spread adjustment', e.target.checked ? 'Added to the PAM spread' : 'Not added to the PAM spread');
+      save();
+      toast('Setting saved. Re-run detection to apply it.');
+      return;
+    }
     const key = e.target.dataset && e.target.dataset.input;
     if (!key || !e.target.files || !e.target.files[0]) return;
     const inp = INPUTS.find(i => i.key === key);
     const file = e.target.files[0];
     const reader = new FileReader();
     reader.onload = () => {
-      const rows = E.parseCSV(reader.result);
+      let rows = E.parseCSV(reader.result);
+      if (inp.report && E.isAllVueReport(rows.headers)) {
+        const missingReport = E.missingReportColumns(rows.headers);
+        if (missingReport.length) { toast(`${file.name} is missing report columns: ${missingReport.join(', ')}. Nothing was loaded.`); e.target.value = ''; return; }
+        const m = file.name.match(/(20\d{2})-?(\d{2})-?(\d{2})/);
+        const asOfDate = m ? `${m[1]}-${m[2]}-${m[3]}` : (document.getElementById(`asof-${key}`)?.value || '');
+        if (!asOfDate) { toast('Set the as-of date of the report first, or put the date in the file name.'); e.target.value = ''; return; }
+        const converted = E.fromAllVueReport(rows, { asOfDate });
+        if (converted.notes.length) toast(`Loaded with values the app doesn't recognise: ${converted.notes.join('; ')}.`);
+        const headers = E.LAYOUTS.allvue;
+        rows = converted.rows;
+        rows.headers = headers;
+      }
       const missing = E.missingColumns(rows.headers, E.LAYOUTS[inp.layout]);
       if (missing.length) { toast(`${file.name} is missing columns: ${missing.join(', ')}. Nothing was loaded.`); e.target.value = ''; return; }
       if (!rows.length) { toast(`${file.name} has headers but no rows. Nothing was loaded.`); e.target.value = ''; return; }

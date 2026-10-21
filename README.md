@@ -68,6 +68,26 @@ The sample is a fictional October 2026 export with 13 rows: 7 clean, 3 for revie
 
 Every event has a deterministic key (portfolio, asset, effective date, contract IDs), so re-running detection never creates duplicates and keeps decisions already made.
 
+## AllVue contracts report
+
+The AllVue prior and current slots take the **AllVue contracts report as-is** (one row per portfolio, facility and accrual). Headers are matched without brackets or case. The report has no as-of date, so the app reads it from the file name (e.g. `allvue-contracts-report-2026-10-29.csv`) or from the date field on the Setup tab. Sample files are in `docs/samples/`.
+
+| Report column | App field | Conversion |
+|---|---|---|
+| `portfolioId` | AllVue portfolio | Keys the portfolio map |
+| `primaryIdentifier` | Facility (asset) | Keys the tranche map; stored in PAM's alternative ID table |
+| `referenceAccrualId` | Contract | Linked to PAM contracts through the lineage table |
+| `accrualType` | Contract kind | Funded; Unfunded and Delayed Draw Unfunded → unfunded; Letter of Credit → counts toward the commitment only; % of Funded → ignored |
+| `instrumentType` | Facility type | Term Loan TL, Revolver RC, Delayed Draw DDTL |
+| `baseRateIndexName` | Base rate, tenor | `1M SOFR Term` → SOFR 1M; reset frequency comes from the tenor |
+| `rateType`, `interestPaymentType` | Rate type, interest type | Float → Floating; Cash / Capitalize |
+| `spread`, `spreadAdjustment` | Margin (bps) | Decimals × 10,000. The adjustment is added to the PAM spread when the Setup setting is on |
+| `rateFloor`, `rateCeiling` | Floor, cap (%) | Decimals × 100 |
+| `dayCount` | Day count | ACT/360, ACT/365 (Fixed), 30U/360. ACT/ACT has no PAM code yet |
+| `numPaymentsPerYear` | Pay frequency | 12 monthly, 4 quarterly, 2 semi-annual, 1 annual; 52 has no PAM code yet |
+| `beginDate`, `endDate` | Contract period | |
+| `accrualAmount`, `globalAccrualAmount` | Position, global amount | Commitment = funded + unfunded + letters of credit per portfolio and facility |
+
 ## Input files
 
 Load these on **Setup and data** as CSV. Header names must match.

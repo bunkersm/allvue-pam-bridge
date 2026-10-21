@@ -1,27 +1,27 @@
 PAMField,MessagePosition,AllVueField,AllVueValue,PAMCode,Status,Notes
-loan_type,SMFBANKLOANTRANCHE pos 4,FacilityType,TL,1,From spec,Term
-loan_type,SMFBANKLOANTRANCHE pos 4,FacilityType,RC,2,From spec,Revolver
-loan_type,SMFBANKLOANTRANCHE pos 4,FacilityType,DDTL,3,From spec,Delayed draw
+loan_type,SMFBANKLOANTRANCHE pos 4,instrumentType,Term Loan,1,From spec,Term
+loan_type,SMFBANKLOANTRANCHE pos 4,instrumentType,Revolver,2,From spec,Revolver
+loan_type,SMFBANKLOANTRANCHE pos 4,instrumentType,Delayed Draw,3,From spec,Delayed draw
 currency,SMFBANKLOANTRANCHE pos 6,Currency,USD,1,Assumed,Numeric PAM currency code; currently taken from the tranche map PAMCurrency column
-coupon_type,COUPONDATA pos 1,RateType,Floating,V,From spec,
-coupon_type,COUPONDATA pos 1,RateType,Fixed,F,From spec,
-coupon_form,COUPONDATA pos 3,InterestType,Cash,C,From spec,
-coupon_form,COUPONDATA pos 3,InterestType,Capitalize,P,From spec,PIK
-coupon_form,COUPONDATA pos 3,InterestType,Partial,P,Assumed,Partial PIK; minimal message has no PIK split
-coupon_freq,COUPONDATA pos 4,PayFreq,Monthly,M,From spec,
-coupon_freq,COUPONDATA pos 4,PayFreq,Quarterly,Q,From spec,
-coupon_freq,COUPONDATA pos 4,PayFreq,Semi-Annual,S,From spec,
-coupon_freq,COUPONDATA pos 4,PayFreq,Annual,A,From spec,
-coupon_freq,COUPONDATA pos 4,PayFreq,At Maturity,B,From spec,
-day_count,COUPONDATA pos 5,DayCount,ACT/360,D,From spec,
-day_count,COUPONDATA pos 5,DayCount,ACT/365,C,From spec,Act/365 Fixed
-day_count,COUPONDATA pos 5,DayCount,30/360,A,From spec,
-reset_freq,FLOATDATA pos 3,ResetFreq,Monthly,M,Assumed,Same codes as coupon_freq
-reset_freq,FLOATDATA pos 3,ResetFreq,Quarterly,Q,Assumed,Same codes as coupon_freq
-reset_freq,FLOATDATA pos 3,ResetFreq,Semi-Annual,S,Assumed,Same codes as coupon_freq
-base_index,FLOATDATA pos 1,BaseRate + Tenor,SOFR 1M,SR1M,From spec,1M Term SOFR
-base_index,FLOATDATA pos 1,BaseRate + Tenor,SOFR 3M,SR3M,From spec,3M Term SOFR
-base_index,FLOATDATA pos 1,BaseRate + Tenor,SOFR 6M,SR6M,Assumed,
+coupon_type,COUPONDATA pos 1,rateType,Float,V,From spec,
+coupon_type,COUPONDATA pos 1,rateType,Fixed,F,From spec,
+coupon_form,COUPONDATA pos 3,interestPaymentType,Cash,C,From spec,
+coupon_form,COUPONDATA pos 3,interestPaymentType,Capitalize,P,From spec,PIK
+coupon_form,COUPONDATA pos 3,interestPaymentType,Partial,P,Assumed,Partial PIK; minimal message has no PIK split
+coupon_freq,COUPONDATA pos 4,numPaymentsPerYear,12,M,From spec,
+coupon_freq,COUPONDATA pos 4,numPaymentsPerYear,4,Q,From spec,
+coupon_freq,COUPONDATA pos 4,numPaymentsPerYear,2,S,From spec,
+coupon_freq,COUPONDATA pos 4,numPaymentsPerYear,1,A,From spec,
+coupon_freq,COUPONDATA pos 4,numPaymentsPerYear,(none),B,From spec,
+day_count,COUPONDATA pos 5,dayCount,ACT/360,D,From spec,
+day_count,COUPONDATA pos 5,dayCount,ACT/365 (Fixed),C,From spec,Act/365 Fixed
+day_count,COUPONDATA pos 5,dayCount,30U/360,A,From spec,
+reset_freq,FLOATDATA pos 3,baseRateIndexName tenor,1M,M,Assumed,Reset frequency is not in the report; taken from the SOFR tenor
+reset_freq,FLOATDATA pos 3,baseRateIndexName tenor,3M,Q,Assumed,Reset frequency is not in the report; taken from the SOFR tenor
+reset_freq,FLOATDATA pos 3,baseRateIndexName tenor,6M,S,Assumed,Reset frequency is not in the report; taken from the SOFR tenor
+base_index,FLOATDATA pos 1,baseRateIndexName,1M SOFR Term,SR1M,From spec,1M Term SOFR
+base_index,FLOATDATA pos 1,baseRateIndexName,3M SOFR Term,SR3M,From spec,3M Term SOFR
+base_index,FLOATDATA pos 1,baseRateIndexName,6M SOFR Term,SR6M,Assumed,
 payment_type,SMFBANKLOANCONTRACTREC pos 4,,(all),B,From spec default,Bullet; S = scheduled
 dated_type,COUPONDATA pos 8,,(all),T,From spec default,Settle date
 float_method,FLOATDATA pos 2,,(all),A,Open item,Meaning to confirm
@@ -30,3 +30,10 @@ reset_date_conv,RESETDATECONV,,(all),3,Open item,Meaning to confirm
 holiday_schedule,HOLIDAYS pos 1,,(all),US,From spec default,
 reset_holiday_schedule,RESETHOLIDAYSCHEDULE,,(all),US,From spec default,
 lookback_days,LOCKOUTINFORMATION pos 2,,(all),2,From spec default,
+coupon_freq,COUPONDATA pos 4,numPaymentsPerYear,52,,Open item,Weekly; no PAM code known. Contract creates with it are blocked
+day_count,COUPONDATA pos 5,dayCount,ACT/ACT (ICMA),,Open item,No PAM code known. Contract creates with it are blocked
+day_count,COUPONDATA pos 5,dayCount,ACT/ACT (ISDA),,Open item,No PAM code known. Contract creates with it are blocked
+base_index,FLOATDATA pos 1,baseRateIndexName,Prime,,Open item,No PAM base index known. Contract creates with it are blocked
+spread_bps,COMPOUNDFACTORS pos 1,spread + spreadAdjustment,decimal (0.05),bps (500),Assumed,spread x 10000; spreadAdjustment added when the Setup setting is on (open question)
+min_rate,FLOATDATA pos 8,rateFloor,decimal (0.01),percent (1.000000),Assumed,rateFloor x 100
+max_rate,FLOATDATA pos 7,rateCeiling,decimal or blank,percent; 0 = no cap,Assumed,rateCeiling x 100
