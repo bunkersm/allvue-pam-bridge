@@ -55,7 +55,7 @@ The app keeps a table of which IAS contract each Loan System contract is, becaus
 
 ### Trades
 
-Buys, sells and new purchases are booked in IAS by the **trade feed**, not by this app. A position change with no change in the facility's global amount is a trade, and nothing is sent. A position that wasn't in the prior snapshot is a **new purchase**: nothing is sent, but an initial long or short first period goes to review with IAS's expected first pay date next to the Loan System's. A trade on the same day as a split, combine or terms change goes to review.
+Buys, sells and new purchases are booked in IAS by the **trade feed**, not by this app. A position change with no change in the facility's global amount is a trade, and nothing is sent. A position that wasn't in the prior snapshot is a **new purchase**: nothing is sent, but an initial long or short first period goes to review with IAS's expected first pay date next to the Loan System's. A trade on the same day as a split, combine or terms change goes to review. The Trades view shows each facility's commitment, funded and unfunded after the trade, with the day's change, and totals across all trades.
 
 1. **Detect.** For each Loan System portfolio and asset, compare the prior-day and current-day contract exports. Contracts that are gone are *expiring*; contracts that appeared are *new*; contracts with the same ID but a different amount or terms are *amended*.
 2. **Classify.**

@@ -520,8 +520,21 @@
       const msg = q ? 'No events match that search.' : state.filter === 'review' ? 'Nothing waiting for review.' : 'No events in this group.';
       return `<div class="table-wrap"><div class="empty">${msg}</div></div>`;
     }
+    // The trades view shows each facility's position after the trade, and totals for all of them.
+    const trades = state.filter === 'trades';
+    const pos = (after, before) => `${money(after)}<div class="small">${deltaCell(after - before)}</div>`;
+    const sumOf = f => rows.reduce((t, ev) => t + ev.totals[f], 0);
+    const positionCells = ev => `<td class="num">${pos(ev.totals.commitmentAfter, ev.totals.commitmentBefore)}</td>
+          <td class="num">${pos(ev.totals.fundedAfter, ev.totals.fundedBefore)}</td>
+          <td class="num">${pos(ev.totals.unfundedAfter, ev.totals.unfundedBefore)}</td>`;
+    const tradeTotals = trades ? `<tfoot><tr><td colspan="6">Total, ${rows.length} ${rows.length === 1 ? 'facility' : 'facilities'}</td>
+        <td class="num">${pos(sumOf('commitmentAfter'), sumOf('commitmentBefore'))}</td>
+        <td class="num">${pos(sumOf('fundedAfter'), sumOf('fundedBefore'))}</td>
+        <td class="num">${pos(sumOf('unfundedAfter'), sumOf('unfundedBefore'))}</td><td></td></tr></tfoot>` : '';
     return `<div class="table-wrap"><table>
-      <thead><tr><th>Status</th><th>Event</th><th>Asset</th><th>Held in</th><th>Effective</th><th>Loan System contracts</th><th class="num">Funded change</th><th class="num">IAS msgs</th><th>Checks</th></tr></thead>
+      <thead><tr><th>Status</th><th>Event</th><th>Asset</th><th>Held in</th><th>Effective</th><th>Loan System contracts</th>${trades
+        ? '<th class="num">Commitment</th><th class="num">Funded</th><th class="num">Unfunded</th>'
+        : '<th class="num">Funded change</th><th class="num">IAS msgs</th>'}<th>Checks</th></tr></thead>
       <tbody>${rows.map(ev => {
         const st = statusOf(ev);
         const info = statusInfo(ev);
@@ -533,11 +546,12 @@
           <td>${heldInCell(ev)}</td>
           <td class="mono nowrap">${esc(ev.effectiveDate)}</td>
           <td class="mono">${esc(contractsSummary(ev))}</td>
-          <td class="num">${deltaCell(ev.totals.fundedDelta)}</td>
-          <td class="num">${fileMsgs(ev).length || '<span class="muted">0</span>'}</td>
+          ${trades ? positionCells(ev) : `<td class="num">${deltaCell(ev.totals.fundedDelta)}</td>
+          <td class="num">${fileMsgs(ev).length || '<span class="muted">0</span>'}</td>`}
           <td class="small">${ev.flags.some(f => f.level === 'exception') ? `<span style="color:var(--bad)">${issueCount(ev)}</span>` : issueCount(ev) ? `<span style="color:var(--warn)">${issueCount(ev)}</span>` : '<span class="muted">Passed</span>'}</td>
         </tr>`;
-      }).join('')}</tbody></table></div>`;
+      }).join('')}</tbody>${tradeTotals}</table></div>
+      ${trades ? '<p class="small muted">Positions after the trade, across every Loan System portfolio holding the facility, with the change from the prior day underneath. The trade feed books these in IAS.</p>' : ''}`;
   }
 
   // ---- event detail

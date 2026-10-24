@@ -601,6 +601,7 @@ Utilitarian, readable operations tool. Light and dark themes (system preference)
 - Tiles that double as filters: Needs review, Exceptions, Clean rollovers, Trades, Approved, Awaiting import, Done (and "Show all events").
 - Search box (issuer, instrument, facility ID, contract IDs, portfolio names).
 - Table: Status chip; Event (type plus leg tags, failed import error); Asset (issuer over instrument, facility ID · type); **Held in** (Loan System portfolio name, or "N Loan System portfolios", and the IAS portfolio count); Effective date; Loan System contracts (expired → added, amended); Funded change; IAS messages (file messages only); Checks (issue count, coloured by severity, or "Passed").
+- On the **Trades** filter, Funded change and IAS messages are replaced by **Commitment**, **Funded** and **Unfunded**: each facility's position after the trade (all Loan System portfolios), with the change from the prior day underneath, and a footer row totalling them across the trades shown.
 
 **Event panel** (slides in from the right; Escape closes)
 - Header: type · facility type · "held in N Loan System portfolios"; issuer as title; instrument and facility ID; status chip; leg tags; effective date.
