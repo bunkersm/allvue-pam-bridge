@@ -601,6 +601,7 @@ Utilitarian, readable operations tool. Light and dark themes (system preference)
 - Tiles that double as filters: Needs review, Exceptions, Clean rollovers, Trades, Approved, Awaiting import, Done (and "Show all events").
 - Search box (issuer, instrument, facility ID, contract IDs, portfolio names).
 - Table: Status chip; Event (type plus leg tags, failed import error); Asset (issuer over instrument, facility ID · type); **Held in** (Loan System portfolio name, or "N Loan System portfolios", and the IAS portfolio count); Effective date; Loan System contracts (expired → added, amended); Funded change; IAS messages (file messages only); Checks (issue count, coloured by severity, or "Passed").
+- The **Trades** tile and filter list every event with a trade or new purchase (`isTrade || isNew`) whatever its status, so a trade that needs review appears under both Needs review and Trades. Under each trade row is its **facility initializing global action** (`initializeFacilityMessage(ev, { lineage, actionType })`): `BANKLOANACTION` with one `BANKLOANACTIONCONTRACTALLOCREC` per live contract (added, amended, unchanged) at its full **global amount**, dated the effective date, with the action type from Setup ("Initializing global action type", blank until confirmed, which shows a warning). It isn't ready (and shows why) if the facility isn't mapped, a contract has no linked IAS contract (new purchases: link it under Contract links once the trade has posted) or no global amount. Each row has Copy, plus **Copy all initializing messages**; the event drawer shows it pretty-printed. These messages are not put in IAS files.
 - On the **Trades** filter, Funded change and IAS messages are replaced by **Commitment**, **Funded** and **Unfunded**: each facility's position after the trade (all Loan System portfolios), with the change from the prior day underneath, and a footer row totalling them across the trades shown.
 
 **Event panel** (slides in from the right; Escape closes)
@@ -680,6 +681,7 @@ All in `tests/engine.test.js`. Each bullet is at least one test.
 - Portfolio without bank details → exception.
 - A fund redeeming more than it holds → exception naming the fund.
 - Future-dated redemption/drawdown → one file warning; none when today is later.
+- Initializing global action: for the A1023 trade with action type 1, exactly `BANKLOANACTION(Add,,SecID(3,<tranche>),20261030,1,,BANKLOANACTIONCONTRACTALLOC(BANKLOANACTIONCONTRACTALLOCREC(ContractSecID(26,<linked IAS contract>),<global amount>)))`; for the A1035 new purchase, not ready until its contract is linked, and a warning while the action type is blank.
 - Lineage export: of current contracts C2 (two portfolios) and C9, with links C1→IAS-1 and C2→IAS-1, rows = [C2→IAS-1], unlinked = [C9], expired = 1, liveCount = 2; with `liveOnly: false` rows are C1 and C2; the CSV parses back through `normalizeLineage` to the same links.
 
 ### 16.3 Trades, new purchases, dates

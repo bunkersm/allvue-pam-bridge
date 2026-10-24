@@ -42,7 +42,7 @@
     { id: 'review', label: 'Needs review', desc: 'Approve or reject', cls: 't-review' },
     { id: 'exception', label: 'Exceptions', desc: 'Data or setup to fix', cls: 't-exception' },
     { id: 'auto', label: 'Clean rollovers', desc: 'Verified, nothing to send', cls: 't-auto' },
-    { id: 'trades', label: 'Trades', desc: 'Booked by the trade feed', cls: 't-trade' },
+    { id: 'trades', label: 'Trades', desc: 'Trades and new purchases', cls: 't-trade' },
     { id: 'approved', label: 'Approved', desc: 'Waiting for an IAS file', cls: 't-approved' },
     { id: 'batch', label: 'Awaiting import', desc: 'In an IAS file', cls: 't-batch' },
     { id: 'done', label: 'Done', desc: 'Loaded, closed or rejected', cls: 't-done' },
@@ -420,11 +420,20 @@
     return `<span class="chip ${s.chip}">${esc(s.label)}</span>`;
   }
 
+  // The Trades view lists every event with a trade or new purchase, whatever its status, so a
+  // trade that needs review shows under both Needs review and Trades.
+  const isTradeEvent = ev => !!(ev.isTrade || ev.isNew);
+  const inGroup = (ev, group) => group === 'all' || (group === 'trades' ? isTradeEvent(ev) : STATUS[statusOf(ev)].group === group);
+
   function groupCounts() {
     const counts = Object.fromEntries(GROUPS.map(g => [g.id, 0]));
-    state.events.forEach(ev => { counts[STATUS[statusOf(ev)].group]++; counts.all++; });
+    state.events.forEach(ev => { const grp = STATUS[statusOf(ev)].group; if (grp !== 'trades') counts[grp]++; counts.all++; });
+    counts.trades = state.events.filter(isTradeEvent).length;
     return counts;
   }
+
+  /** The facility initializing global action for a trade event, with the action type from Setup. */
+  const initMessage = ev => E.initializeFacilityMessage(ev, { lineage: state.lineage, actionType: (state.settings && state.settings.initActionType) || '' });
 
   function feeGroupCounts() {
     const counts = Object.fromEntries(FEE_GROUPS.map(g => [g.id, 0]));
@@ -511,7 +520,7 @@
   function queueTable() {
     const q = state.search.trim().toLowerCase();
     const rows = state.events.filter(ev => {
-      if (state.filter !== 'all' && STATUS[statusOf(ev)].group !== state.filter) return false;
+      if (!inGroup(ev, state.filter)) return false;
       if (!q) return true;
       const hay = [ev.assetName, issuerOf(ev), ...(ev.holdings || []).flatMap(h => [h.portfolioName, h.loanPortfolio, ...(h.iasPortfolios || [])]), ev.assetId, ev.typeLabel, ...ev.expired.map(c => c.contractId), ...ev.added.map(c => c.contractId), ...ev.amended.map(a => a.cur.contractId)].join(' ').toLowerCase();
       return hay.includes(q);
@@ -527,6 +536,15 @@
     const positionCells = ev => `<td class="num">${pos(ev.totals.commitmentAfter, ev.totals.commitmentBefore)}</td>
           <td class="num">${pos(ev.totals.fundedAfter, ev.totals.fundedBefore)}</td>
           <td class="num">${pos(ev.totals.unfundedAfter, ev.totals.unfundedBefore)}</td>`;
+    const initRow = ev => {
+      const x = initMessage(ev);
+      const body = x.text
+        ? `<div class="row" style="gap:8px;align-items:flex-start;flex-wrap:nowrap"><pre class="file" style="margin:0;flex:1;white-space:pre-wrap;word-break:break-all">${esc(x.text)}</pre>
+            <button class="btn ghost" data-action="copyInit" data-key="${esc(ev.key)}">Copy</button></div>`
+        : `<div class="small" style="color:var(--bad)">${esc(x.problems.join(' '))}</div>`;
+      return `<tr class="subrow"><td></td><td colspan="9"><div class="small muted" style="margin-bottom:4px">Initialize facility · global action, ${x.allocs.length} ${x.allocs.length === 1 ? 'contract' : 'contracts'} at global ${money(x.globalTotal)}</div>${body}
+        ${x.text && x.warnings.length ? `<div class="small" style="color:var(--warn);margin-top:4px">${esc(x.warnings.join(' '))}</div>` : ''}</td></tr>`;
+    };
     const tradeTotals = trades ? `<tfoot><tr><td colspan="6">Total, ${rows.length} ${rows.length === 1 ? 'facility' : 'facilities'}</td>
         <td class="num">${pos(sumOf('commitmentAfter'), sumOf('commitmentBefore'))}</td>
         <td class="num">${pos(sumOf('fundedAfter'), sumOf('fundedBefore'))}</td>
@@ -549,9 +567,10 @@
           ${trades ? positionCells(ev) : `<td class="num">${deltaCell(ev.totals.fundedDelta)}</td>
           <td class="num">${fileMsgs(ev).length || '<span class="muted">0</span>'}</td>`}
           <td class="small">${ev.flags.some(f => f.level === 'exception') ? `<span style="color:var(--bad)">${issueCount(ev)}</span>` : issueCount(ev) ? `<span style="color:var(--warn)">${issueCount(ev)}</span>` : '<span class="muted">Passed</span>'}</td>
-        </tr>`;
+        </tr>${trades ? initRow(ev) : ''}`;
       }).join('')}</tbody>${tradeTotals}</table></div>
-      ${trades ? '<p class="small muted">Positions after the trade, across every Loan System portfolio holding the facility, with the change from the prior day underneath. The trade feed books these in IAS.</p>' : ''}`;
+      ${trades ? `<p class="small muted">Positions after the trade, across every Loan System portfolio holding the facility, with the change from the prior day underneath. The trade feed books these in IAS. Under each trade is its facility initializing global action: the global action with each contract at its full global amount.</p>
+        <div class="row"><button class="btn" data-action="copyAllInit">Copy all initializing messages</button></div>` : ''}`;
   }
 
   // ---- event detail
@@ -593,6 +612,15 @@
       default:
         return `Commitment changed from ${money(t.commitmentBefore)} to ${money(t.commitmentAfter)}.`;
     }
+  }
+
+  function initSection(ev) {
+    const x = initMessage(ev);
+    return `<section><h3>Initialize facility</h3>
+      ${x.problems.length ? `<ul class="flags">${x.problems.map(t => `<li class="flag exception"><b>Not ready.</b>${esc(t)}</li>`).join('')}</ul>`
+        : `<pre class="file">${esc(E.iasMessageText(x.message, { pretty: true }))}</pre>`}
+      ${x.warnings.map(t => `<p class="small" style="color:var(--warn)">${esc(t)}</p>`).join('')}
+      <p class="small muted">The global action with each live contract at its full global amount (${money(x.globalTotal)} in all), so IAS has the facility's global picture for this trade. Copy it from the Trades view.</p></section>`;
   }
 
   /**
@@ -828,6 +856,7 @@
               <div><dt>IAS tranche</dt><dd class="mono">${esc(ev.iasTrancheId) || 'Not mapped'}</dd></div>
             </dl></section>
           ${contractLinks(ev)}
+          ${isTradeEvent(ev) ? initSection(ev) : ''}
           <section><h3>Holdings by portfolio</h3>${holdingsTable(ev)}</section>
           ${ev.paydownTieOut ? `<section><h3>Paydown tie-out</h3>${paydownTieOutTable(ev)}</section>` : ''}
           <section><h3>Allocation to IAS portfolios</h3>${eventAllocations(ev)}</section>
@@ -1103,6 +1132,11 @@
             <input type="checkbox" id="set-spread-adj" ${state.settings && state.settings.addSpreadAdjustment === false ? '' : 'checked'} style="margin-top:3px">
             <span><b>Add Loan System's spreadAdjustment to the IAS spread.</b><br><span class="small muted">IAS can't hold a base rate adjustment, so it is folded into the spread. A change in the adjustment from one period to the next then becomes a contract change. Re-run detection after changing this.</span></span>
           </label>
+          <label class="row" for="set-init-action-type" style="align-items:center;gap:10px">
+            <span><b>Initializing global action type</b></span>
+            <input type="text" id="set-init-action-type" class="mono" style="width:6em" placeholder="code" value="${esc((state.settings && state.settings.initActionType) || '')}">
+            <span class="small muted">The IAS action type code for the facility initializing global action shown on Trades. Leave blank until it's confirmed.</span>
+          </label>
           <label class="row" for="set-auto-paydown" style="align-items:flex-start;gap:10px">
             <input type="checkbox" id="set-auto-paydown" ${autoApproveSettings().paydowns ? 'checked' : ''} style="margin-top:3px">
             <span><b>Auto-approve paydowns whose units tie out.</b><br><span class="small muted">A paydown with nothing else changing (on its own, or at a clean roll) is approved without a person when, in every portfolio, IAS ties to the Loan System before the event, the redemptions leave IAS tied after it, and the portfolio's paydown is within ${money(E.AUTO_PAYDOWN_SHARE_TOLERANCE)} of its share of the global paydown. Anything flagged for review or an exception is never auto-approved.</span></span>
@@ -1257,6 +1291,19 @@
         if (b) download(b.fileName, batchContent(b));
         return;
       }
+      case 'copyInit': {
+        const ev = itemByKey(key);
+        const x = ev && initMessage(ev);
+        if (x && x.text) copyText(`${x.text}\n`, 'the initializing message');
+        return;
+      }
+      case 'copyAllInit': {
+        const list = state.events.filter(isTradeEvent).map(initMessage);
+        const ready = list.filter(x => x.text);
+        if (!ready.length) { toast('No initializing messages are ready. Link the IAS contracts first.'); return; }
+        copyText(ready.map(x => `${x.text}\n`).join(''), `${ready.length} initializing ${ready.length === 1 ? 'message' : 'messages'}${ready.length < list.length ? ` (${list.length - ready.length} not ready)` : ''}`);
+        return;
+      }
       case 'saveLink': {
         const ev = itemByKey(key);
         const contract = el.dataset.contract;
@@ -1325,6 +1372,13 @@
   });
 
   document.addEventListener('change', e => {
+    if (e.target.id === 'set-init-action-type') {
+      state.settings = { ...(state.settings || {}), initActionType: e.target.value.trim() };
+      log('Changed setting', '', 'Initializing global action type', state.settings.initActionType || 'Blank');
+      save();
+      toast('Saved. The initializing messages on Trades use it now.');
+      return;
+    }
     if (e.target.id === 'eod-all-links') { state.eodAllLinks = e.target.checked; save(); render(); return; }
     if (e.target.id === 'set-auto-paydown' || e.target.id === 'set-auto-paydown-max') {
       const raw = document.getElementById('set-auto-paydown-max').value.trim();

@@ -1411,6 +1411,35 @@
     return pretty ? prettyPrint(n) : assertBalanced(serialize(n));
   }
 
+  /**
+   * Facility initializing global action for a trade or new purchase: the existing global
+   * action (BANKLOANACTION) with every live contract at its full global amount, so IAS has
+   * the facility's global picture. The action type is the IAS code for initializing, set
+   * by the user until it's confirmed.
+   */
+  function initializeFacilityMessage(ev, { lineage = {}, actionType = '' } = {}) {
+    const live = [...ev.added, ...ev.amended.map(a => a.cur), ...ev.unchanged];
+    const allocs = live.map(c => ({ loanContractId: c.contractId, iasContractId: lineage[c.contractId] || '', units: c.globalAmount }));
+    const problems = [];
+    const warnings = [];
+    if (!ev.iasTrancheId) problems.push('The facility is not mapped to an IAS tranche.');
+    if (!allocs.length) problems.push('No live contracts to initialize.');
+    const unlinked = allocs.filter(a => !a.iasContractId).map(a => a.loanContractId);
+    if (unlinked.length) problems.push(`Contract ${unlinked.join(', ')} has no linked IAS contract. Link it under Contract links once the trade has posted.`);
+    const noGlobal = allocs.filter(a => !(a.units > 0)).map(a => a.loanContractId);
+    if (noGlobal.length) problems.push(`Contract ${noGlobal.join(', ')} has no global amount.`);
+    if (!String(actionType).trim()) warnings.push('No action type for the initializing global action. Set it on Setup.');
+    const message = {
+      level: 'GLOBAL', type: 'INITIALIZE', step: 1, facilityId: ev.iasTrancheId, effectiveDate: ev.effectiveDate,
+      actionType: String(actionType).trim(), allocs: allocs.map(a => ({ contractId: a.iasContractId, units: a.units })),
+    };
+    return {
+      message, allocs, problems, warnings,
+      globalTotal: allocs.reduce((t, a) => t + a.units, 0),
+      text: problems.length ? '' : iasMessageText(message),
+    };
+  }
+
   /** A short description of a message that has to be done by hand. */
   function manualStepText(m) {
     if (m.level === 'SMF') {
@@ -1578,7 +1607,7 @@
     AUTO_PAYDOWN_SHARE_TOLERANCE, allocate, detectEvents, buildBatchRows, checkRunDates, firstScheduledPayDate, displayName,
     FEE_TOLERANCE, FEE_POSITION_DRIFT, normalizeFees, expectedFee, checkFees,
     REPORT_REQUIRED, REPORT_OPTIONAL, isLoanReport, missingReportColumns, parseBaseRateIndex, fromLoanReport,
-    IAS, normalizePortfolioAccounts, iasMessageNode, iasMessageText, manualStepText, buildIasFile,
+    IAS, normalizePortfolioAccounts, iasMessageNode, iasMessageText, initializeFacilityMessage, manualStepText, buildIasFile,
     node, serialize, prettyPrint, assertBalanced, IAS_CONTRACT_DEFAULTS, EXCLUDED_CONTRACT_FIELDS,
     contractAddInput, validateContractAdd, contractAddNode, contractAddMessage,
   };

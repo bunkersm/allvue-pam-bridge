@@ -719,3 +719,24 @@ test('end-of-day lineage export keeps live contracts, lists the unlinked, and re
   const csv = E.toCSV(x.rows, E.LAYOUTS.lineage);
   assert.deepEqual(E.normalizeLineage(E.parseCSV(csv)), { C2: 'IAS-1' });
 });
+
+test('facility initializing global action: every live contract at its global amount', () => {
+  const events = detectSample();
+  const trade = byAsset(events, 'A1023'); // sale on a clean roll
+  const lineage = Object.fromEntries(trade.lineageUpdates.map(u => [u.loanContractId, u.iasContractId]));
+  const x = E.initializeFacilityMessage(trade, { lineage, actionType: '1' });
+  assert.deepEqual(x.problems, []);
+  assert.deepEqual(x.warnings, []);
+  assert.equal(x.allocs.length, trade.added.length + trade.unchanged.length + trade.amended.length);
+  assert.equal(x.globalTotal, trade.added.reduce((t, c) => t + c.globalAmount, 0) + trade.unchanged.reduce((t, c) => t + c.globalAmount, 0));
+  const c = trade.added[0];
+  assert.equal(x.text, `BANKLOANACTION(Add,,SecID(3,${trade.iasTrancheId}),${trade.effectiveDate.replace(/-/g, '')},1,,BANKLOANACTIONCONTRACTALLOC(BANKLOANACTIONCONTRACTALLOCREC(ContractSecID(26,${lineage[c.contractId]}),${E.fromCents(c.globalAmount)}0000)))`);
+
+  const buy = byAsset(events, 'A1035'); // new purchase: the trade feed makes the IAS contract
+  const before = E.initializeFacilityMessage(buy, {});
+  assert.equal(before.text, '');
+  assert.ok(before.problems.some(p => /no linked IAS contract/.test(p)));
+  assert.ok(before.warnings.some(w => /No action type/.test(w)));
+  const after = E.initializeFacilityMessage(buy, { lineage: { [buy.added[0].contractId]: 'IAS-NEW-1' } });
+  assert.match(after.text, /^BANKLOANACTION\(Add,,SecID\(3,[^)]+\),20261030,,,BANKLOANACTIONCONTRACTALLOC\(BANKLOANACTIONCONTRACTALLOCREC\(ContractSecID\(26,IAS-NEW-1\),\d+\.\d{6}\)\)\)$/);
+});

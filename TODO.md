@@ -40,6 +40,7 @@ Open work and questions for Loan Event Bridge, roughly in priority order.
 
 - [ ] Bank account reference table by IAS portfolio (defaults plus per-facility overrides) instead of bank columns on the portfolio map.
 - [x] Ask for IAS contract IDs when an event is handled outside the app, so contract lineage stays complete (Contract links box; also for new purchases).
+- [ ] Confirm the facility initializing global action with IAS: action type code, whether it goes before or after the trade feed books the purchase, the date, whether it needs the global commitment, and whether it should go in the IAS file instead of being copied from Trades.
 - [x] End-of-day lineage file to carry links to another computer or browser.
 - [ ] Store the lineage somewhere shared (file share or database) instead of each browser, or rebuild it each morning from the IAS contract-level holdings extract.
 - [ ] Payment date changes (e.g. 15th → 30th): detect and send IAS the new pay day.
