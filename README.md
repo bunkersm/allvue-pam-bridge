@@ -46,6 +46,13 @@ Auto-approved paydowns show as **Auto-approved, units tie** in the Approved tile
 
 A split, combine or roll is dated on the **new contracts' start date**, and every message for it (global action and portfolio transactions) carries that date. The Loan System's convention is that the old contract ends on the day the new ones start. If the new contracts start on different days, or an old contract ends on a different day, the event goes to review. A paydown or draw with no new contracts is dated the business date.
 
+### Contract lineage
+
+The app keeps a table of which IAS contract each Loan System contract is, because tomorrow's events need it. Links are set automatically when an event is verified, auto-approved or approved (a roll keeps the same IAS contract; a split, combine or terms change links to the new IAS contract the app creates).
+
+- **Contract links** in each event lets you type a link where the app can't set it: a **new purchase** (the trade feed creates the IAS contract) or an event **handled outside the app**. Every link typed by hand is in the audit log.
+- **End of day: contract lineage** on the IAS files tab lists live contracts with no link, warns about events not yet finished, and downloads `LINEAGE_<date>.csv` in the lineage file layout. Links are saved in this browser; load the file as the contract lineage to carry them to another computer or browser.
+
 ### Trades
 
 Buys, sells and new purchases are booked in IAS by the **trade feed**, not by this app. A position change with no change in the facility's global amount is a trade, and nothing is sent. A position that wasn't in the prior snapshot is a **new purchase**: nothing is sent, but an initial long or short first period goes to review with IAS's expected first pay date next to the Loan System's. A trade on the same day as a split, combine or terms change goes to review.

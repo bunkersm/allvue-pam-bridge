@@ -357,6 +357,23 @@
     return map;
   }
 
+  /**
+   * End-of-day lineage: the links to carry into tomorrow's run, in the lineage file layout.
+   * Live contracts are the funded contracts in the current snapshot; with liveOnly, links for
+   * contracts that have since expired are left out (tomorrow's prior snapshot is today's current).
+   */
+  function lineageExport({ lineage, current, liveOnly = true }) {
+    const live = new Map();
+    current.filter(c => c.kind === 'funded' && c.contractId).forEach(c => { if (!live.has(c.contractId)) live.set(c.contractId, c); });
+    const ids = liveOnly ? [...live.keys()] : [...new Set([...Object.keys(lineage), ...live.keys()])];
+    const rows = ids.filter(id => lineage[id]).sort().map(id => ({ LoanContractID: id, IASContractID: lineage[id] }));
+    const unlinked = [...live.values()].filter(c => !lineage[c.contractId])
+      .map(c => ({ contractId: c.contractId, assetId: c.assetId, assetName: c.assetName, issuerName: c.issuerName }))
+      .sort((a, b) => a.assetId.localeCompare(b.assetId) || a.contractId.localeCompare(b.contractId));
+    const expired = Object.keys(lineage).filter(id => !live.has(id)).length;
+    return { rows, unlinked, expired, liveCount: live.size };
+  }
+
   // ---------------------------------------------------------------- allocation
 
   /**
@@ -759,7 +776,7 @@
       }
     });
     if (isNew) {
-      info(`New position of ${money(fundedAfter)}. The trade feed books the purchase in IAS; this app sends nothing for it. Link the IAS contract it lands in once the trade has posted.`);
+      info(`New position of ${money(fundedAfter)}. The trade feed books the purchase in IAS; this app sends nothing for it. Once the trade has posted, link the IAS contract it lands in under Contract links.`);
     }
     holdings.filter(h => h.tradeDelta !== 0).forEach(h => {
       const what = h.isNew ? `a new holding of ${money(h.fundedAfter)}` : `a ${h.tradeDelta < 0 ? 'sale' : 'purchase'} of ${money(Math.abs(h.tradeDelta))}`;
@@ -1557,7 +1574,7 @@
     TERM_FIELDS, TERM_LABELS, TENOR_DAYS, TYPE_LABELS, LAYOUTS,
     parseCSV, toCSV, missingColumns,
     toCents, fromCents, formatMoney, normalizeDate, daysBetween,
-    normalizeLoanSystem, normalizeTrancheMap, normalizePortfolioMap, normalizeIasPositions, normalizeLineage,
+    normalizeLoanSystem, normalizeTrancheMap, normalizePortfolioMap, normalizeIasPositions, normalizeLineage, lineageExport,
     AUTO_PAYDOWN_SHARE_TOLERANCE, allocate, detectEvents, buildBatchRows, checkRunDates, firstScheduledPayDate, displayName,
     FEE_TOLERANCE, FEE_POSITION_DRIFT, normalizeFees, expectedFee, checkFees,
     REPORT_REQUIRED, REPORT_OPTIONAL, isLoanReport, missingReportColumns, parseBaseRateIndex, fromLoanReport,

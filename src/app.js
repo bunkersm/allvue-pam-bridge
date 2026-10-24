@@ -65,7 +65,7 @@
     { key: 'portfolioMap', title: 'Portfolio map', layout: 'portfolioMap', desc: 'One row per IAS portfolio fed by a Loan System portfolio, with the BNK() details used in its IAS messages: bank, bank name, custody account and cash bank.' },
     { key: 'trancheMap', title: 'Tranche map', layout: 'trancheMap', desc: 'Links each Loan System asset to its IAS facility security ID, with the maturity date and IAS currency code used in contract creates and splits.' },
     { key: 'iasPositions', title: 'IAS holdings', layout: 'iasPositions', desc: 'Funded and unfunded position per IAS portfolio and tranche, as of the same date as the Loan System prior snapshot. Used for tie-out and allocation.' },
-    { key: 'lineage', title: 'Contract lineage', layout: 'lineage', desc: 'Which IAS contract each live Loan System contract represents.' },
+    { key: 'lineage', title: 'Contract lineage', layout: 'lineage', desc: 'Which IAS contract each live Loan System contract represents. Load the end-of-day lineage file from the IAS files tab here to carry links to another computer or browser.' },
     { key: 'fees', title: 'Loan System unfunded fee export', layout: 'fees', desc: 'Monthly commitment and ticking fees. PeriodEnd is the last accrual day.' },
   ];
 
@@ -581,6 +581,39 @@
     }
   }
 
+  /**
+   * The event's live Loan System contracts and the IAS contract each links to. A person types
+   * the link where the app can't set it: a new purchase (the trade feed makes the IAS contract)
+   * or an event handled outside the app.
+   */
+  function contractLinks(ev) {
+    const live = [...ev.added, ...ev.amended.map(a => a.cur), ...ev.unchanged];
+    if (!live.length) return '';
+    const st = statusOf(ev);
+    const setOnApproval = ['pending', 'ready'].includes(st);
+    const rows = live.map(c => {
+      const linked = state.lineage[c.contractId] || '';
+      const proposed = (ev.lineageUpdates || []).find(u => u.loanContractId === c.contractId);
+      // Editable unless the app sets this link itself: on approval, or already set by an approval.
+      const editable = !proposed || ['manual', 'trade_feed'].includes(st) || (!linked && !setOnApproval);
+      const current = linked ? `<span class="mono">${esc(linked)}</span>`
+        : proposed && setOnApproval ? `<span class="muted">Set on approval: <span class="mono">${esc(proposed.iasContractId)}</span></span>`
+          : '<span style="color:var(--bad)">Not linked</span>';
+      const input = editable ? `<div class="row" style="gap:6px;flex-wrap:nowrap">
+          <input type="text" class="mono" id="link-${esc(c.contractId)}" value="${esc(linked)}" placeholder="IAS contract ID" aria-label="IAS contract for ${esc(c.contractId)}" style="width:12em">
+          <button class="btn" data-action="saveLink" data-key="${esc(ev.key)}" data-contract="${esc(c.contractId)}">${linked ? 'Update' : 'Link'}</button></div>` : '';
+      return `<tr><td class="mono">${esc(c.contractId)}</td><td>${current}</td><td>${input}</td></tr>`;
+    }).join('');
+    const unlinked = live.filter(c => !state.lineage[c.contractId]
+      && !(setOnApproval && (ev.lineageUpdates || []).some(u => u.loanContractId === c.contractId))).length;
+    const hint = ev.isNew ? 'The trade feed creates the IAS contract for a new purchase. Once the trade has posted, type its IAS contract ID here.'
+      : st === 'manual' ? 'Handled outside the app, so the app can\'t tell which IAS contracts were used. Type them here.'
+        : 'Links are set when the event is approved or verified. Type one here only if the app can\'t set it.';
+    return `<section><h3>Contract links${unlinked ? ` <span class="chip c-exception">${unlinked} not linked</span>` : ''}</h3>
+      <div class="table-wrap"><table><thead><tr><th>Loan System contract</th><th>IAS contract</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+      <p class="small muted">${hint} Tomorrow's run uses these links to find the IAS contract for each of today's contracts.</p></section>`;
+  }
+
   function contractTable(ev) {
     const iasFor = id => state.lineage[id] || '';
     const ref = ev.expired[0];
@@ -715,7 +748,7 @@
             <button class="btn danger" data-action="reject" data-key="${esc(ev.key)}">Reject</button>
           </div>`;
       case 'exception':
-        return `<p class="small">This can't be approved until the problem above is fixed. Correct the data or setup, then ${ev.kind === 'fee' ? 're-check the fees' : 're-run detection'}. If you booked it in IAS yourself, record that here.</p>
+        return `<p class="small">This can't be approved until the problem above is fixed. Correct the data or setup, then ${ev.kind === 'fee' ? 're-check the fees' : 're-run detection'}. If you booked it in IAS yourself, record that here, then link the IAS contracts under Contract links.</p>
           ${comment('How was it handled?')}
           <div class="row"><button class="btn" data-action="manual" data-key="${esc(ev.key)}">Mark as handled outside the app</button></div>`;
       case 'failed':
@@ -780,6 +813,7 @@
               <div><dt>Global funded</dt><dd class="figure">${money(t.globalBefore)} → ${money(t.globalAfter)}</dd><dd class="small muted">${t.globalBefore ? `Your share ${(t.fundedBefore / t.globalBefore * 100).toFixed(4)}%` : ''}</dd></div>
               <div><dt>IAS tranche</dt><dd class="mono">${esc(ev.iasTrancheId) || 'Not mapped'}</dd></div>
             </dl></section>
+          ${contractLinks(ev)}
           <section><h3>Holdings by portfolio</h3>${holdingsTable(ev)}</section>
           ${ev.paydownTieOut ? `<section><h3>Paydown tie-out</h3>${paydownTieOutTable(ev)}</section>` : ''}
           <section><h3>Allocation to IAS portfolios</h3>${eventAllocations(ev)}</section>
@@ -916,10 +950,47 @@
     </div>`;
   }
 
+  /** End-of-day lineage file: today's links, ready to load as tomorrow's lineage. */
+  function eodLineage() {
+    let current = [];
+    try { current = E.normalizeLoanSystem(state.inputs.current || []); } catch { /* no current snapshot loaded */ }
+    const liveOnly = !state.eodAllLinks;
+    const x = E.lineageExport({ lineage: state.lineage, current, liveOnly });
+    const fileName = `LINEAGE_${String(state.asOfDate || '').replace(/-/g, '')}.csv`;
+    return { ...x, liveOnly, fileName, csv: E.toCSV(x.rows, E.LAYOUTS.lineage) };
+  }
+
+  function eodPanel() {
+    const x = eodLineage();
+    const open = state.events.filter(ev => ['pending', 'exception', 'failed', 'approved', 'auto_approved', 'in_batch'].includes(statusOf(ev)));
+    const byContract = new Map();
+    state.events.forEach(ev => [...ev.added, ...ev.amended.map(a => a.cur), ...ev.unchanged].forEach(c => byContract.set(c.contractId, ev)));
+    const unlinkedRows = x.unlinked.map(u => {
+      const ev = byContract.get(u.contractId);
+      const st = ev ? statusOf(ev) : '';
+      return `<tr${ev ? ` data-key="${esc(ev.key)}"` : ''}><td class="mono">${esc(u.contractId)}</td><td>${esc([u.issuerName, u.assetName].filter(Boolean).join(' '))} <span class="mono small muted">${esc(u.assetId)}</span></td><td>${ev ? chip(st) : '<span class="muted small">No event today</span>'}</td></tr>`;
+    }).join('');
+    return `<div class="panel panel-pad stack">
+      <div class="section-head"><h2>End of day: contract lineage</h2><span class="small muted">Business date <span class="mono">${esc(state.asOfDate)}</span></span></div>
+      <p class="small">${x.rows.length} links to carry into tomorrow, for ${x.liveCount} live contracts in today's Loan System snapshot.${x.liveOnly && x.expired ? ` ${x.expired} links for contracts that have expired are left out.` : ''} Load this file as the contract lineage before tomorrow's run if you switch computers or clear this browser.</p>
+      ${open.length ? `<ul class="flags"><li class="flag review"><b>Not finished.</b>${open.length} ${open.length === 1 ? 'event is' : 'events are'} still waiting on a decision or an import result. Their new contracts get links only when they are approved, verified or linked by hand.</li></ul>` : ''}
+      ${x.unlinked.length ? `<div class="stack"><div class="small"><b>${x.unlinked.length} live ${x.unlinked.length === 1 ? 'contract has' : 'contracts have'} no IAS link.</b> Tomorrow they are exceptions if they roll, pay down or change. Open one to link it.</div>
+        <div class="table-wrap"><table><thead><tr><th>Loan System contract</th><th>Facility</th><th>Event today</th></tr></thead><tbody>${unlinkedRows}</tbody></table></div></div>`
+        : '<p class="small" style="color:var(--ok)">Every live contract has an IAS link.</p>'}
+      <label class="row small" for="eod-all-links" style="gap:8px"><input type="checkbox" id="eod-all-links" ${state.eodAllLinks ? 'checked' : ''}> Include links for expired contracts too</label>
+      <div class="row">
+        <button class="btn primary" data-action="downloadLineage">Download ${esc(x.fileName)}</button>
+        <button class="btn" data-action="copyLineage">Copy file contents</button>
+      </div>
+      <details><summary class="small">Preview</summary><pre class="file" id="lineage-file">${esc(x.csv)}</pre></details>
+    </div>`;
+  }
+
   function viewBatches() {
     const list = state.batches.map(b => batchPanel(b)).join('');
     return `
       <section class="section">${readyPanel('event')}${readyPanel('fee')}</section>
+      <section class="section">${eodPanel()}</section>
       <section class="section">
         <div class="section-head"><h2>IAS files</h2><span class="muted small">Split, combine and global action messages follow IAS's samples. The fee file layout is still a placeholder.</span></div>
         ${list || '<div class="panel empty">No IAS files yet. Approve events or fees, then create a file here.</div>'}
@@ -1172,6 +1243,32 @@
         if (b) download(b.fileName, batchContent(b));
         return;
       }
+      case 'saveLink': {
+        const ev = itemByKey(key);
+        const contract = el.dataset.contract;
+        const value = (document.getElementById(`link-${contract}`)?.value || '').trim();
+        if (!ev || !requireUser()) return;
+        if (!value) { toast('Type the IAS contract ID first.'); return; }
+        const before = state.lineage[contract];
+        if (before === value) { toast('That link is already saved.'); return; }
+        state.lineage[contract] = value;
+        log(before ? 'Changed contract link' : 'Linked contract', ev.key, eventLabel(ev), `${contract} → ${value}${before ? ` (was ${before})` : ''}`);
+        render();
+        toast(`Linked ${contract} to IAS contract ${value}.`);
+        return;
+      }
+      case 'downloadLineage': {
+        const x = eodLineage();
+        download(x.fileName, x.csv);
+        log('Exported contract lineage', '', x.fileName, `${x.rows.length} links${x.unlinked.length ? `, ${x.unlinked.length} live contracts not linked` : ''}`);
+        save();
+        return;
+      }
+      case 'copyLineage': {
+        const x = eodLineage();
+        copyText(x.csv, x.fileName, document.getElementById('lineage-file'));
+        return;
+      }
       case 'copyInput': {
         const inp = INPUTS.find(i => i.key === el.dataset.input);
         copyText(E.toCSV(state.inputs[inp.key], E.LAYOUTS[inp.layout]), inp.title.toLowerCase());
@@ -1214,6 +1311,7 @@
   });
 
   document.addEventListener('change', e => {
+    if (e.target.id === 'eod-all-links') { state.eodAllLinks = e.target.checked; save(); render(); return; }
     if (e.target.id === 'set-auto-paydown' || e.target.id === 'set-auto-paydown-max') {
       const raw = document.getElementById('set-auto-paydown-max').value.trim();
       const maxPct = raw === '' || !Number.isFinite(Number(raw)) ? null : Number(raw);

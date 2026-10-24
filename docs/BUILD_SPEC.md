@@ -209,7 +209,7 @@ Position per IAS portfolio and tranche, as of the Loan System prior date. Used f
 
 `LoanContractID, IASContractID`
 
-The working lineage is kept in state and updated as events are approved ([§13](#13-workflow-ias-files-and-audit)). Uploading a lineage file replaces it.
+The working lineage is kept in state and updated as events are approved ([§13](#13-workflow-ias-files-and-audit)). Uploading a lineage file replaces it. People can also link contracts by hand (**Contract links**, [§13.2](#132-actions)), and the end-of-day lineage file ([§13.5](#135-end-of-day-lineage-file)) is in this same layout, so it loads straight back in.
 
 ### 5.7 Fee export
 
@@ -563,6 +563,7 @@ Statuses `pending`, `exception`, `ready`, `trade_feed` and `auto_approved` are s
 - **Re-approve after a failed import**: → approved.
 - **Approve all clean fees**: every `ready` fee → approved.
 - Detection applies lineage updates for `verified`, `trade_feed` and `auto_approved` events.
+- **Link a contract** (event drawer, *Contract links*): lists the event's live contracts (added, amended, unchanged) with their IAS link. A text box and a Link/Update button appear unless the app sets that link itself (a `pending`/`ready` event whose approval will set it, or a link set by an approval). The box always shows for `manual` and `trade_feed` events, so new purchases and events handled outside the app can be linked. Requires the user's name. Writes `lineage[loanContractId] = iasContractId` and logs "Linked contract" or "Changed contract link" with `old → new`.
 
 ### 13.3 IAS files
 
@@ -575,6 +576,17 @@ Statuses `pending`, `exception`, `ready`, `trade_feed` and `auto_approved` are s
 ### 13.4 Audit log
 
 Every detection run (with counts), fee check, approval, rejection, manual handling, undo, file creation, load result, file upload and setting change: time, user, action, item label, comment. Newest first. Clicking an entry for an event or fee opens it.
+
+
+### 13.5 End-of-day lineage file
+
+`lineageExport({ lineage, current, liveOnly = true })` returns `{ rows, unlinked, expired, liveCount }`:
+- **Live contracts** are the distinct funded contract IDs in the current snapshot.
+- `rows`: `{ LoanContractID, IASContractID }` for each linked live contract (with `liveOnly: false`, every link), sorted by contract ID. Tomorrow's prior snapshot is today's current one, so expired links aren't needed.
+- `unlinked`: live contracts with no link (`contractId, assetId, assetName, issuerName`).
+- `expired`: how many links are for contracts no longer live.
+
+The IAS files tab shows an **End of day: contract lineage** panel: link counts; a review flag if events are still pending, in exception, approved, auto-approved, in a file or failed; a table of unlinked live contracts with today's event status (click to open the event); an "include links for expired contracts" option; **Download `LINEAGE_<YYYYMMDD>.csv`** (business date; logged as "Exported contract lineage") and **Copy file contents**; and a preview. The file is in the lineage layout, so loading it as the lineage input restores the links on another computer or browser.
 
 ---
 
@@ -667,6 +679,7 @@ All in `tests/engine.test.js`. Each bullet is at least one test.
 - Portfolio without bank details → exception.
 - A fund redeeming more than it holds → exception naming the fund.
 - Future-dated redemption/drawdown → one file warning; none when today is later.
+- Lineage export: of current contracts C2 (two portfolios) and C9, with links C1→IAS-1 and C2→IAS-1, rows = [C2→IAS-1], unlinked = [C9], expired = 1, liveCount = 2; with `liveOnly: false` rows are C1 and C2; the CSV parses back through `normalizeLineage` to the same links.
 
 ### 16.3 Trades, new purchases, dates
 - A sale on a clean roll: route trade, type TRADE, no messages, lineage still carried forward.

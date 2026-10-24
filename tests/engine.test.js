@@ -701,3 +701,21 @@ test('splits are dated on the new contracts\' start date, and mismatched dates g
   }), 'A1007');
   assert.ok(gap.flags.some(f => f.level === 'review' && /418211 ends 2026-10-29, but the new contracts start 2026-10-30/.test(f.text)));
 });
+
+test('end-of-day lineage export keeps live contracts, lists the unlinked, and reloads', () => {
+  const current = E.normalizeLoanSystem([
+    { LoanPortfolio: 'P1', AssetID: 'A1', AssetName: 'Term Loan', IssuerName: 'Alder Works', ContractID: 'C2', ContractType: 'Funded', Amount: '10' },
+    { LoanPortfolio: 'P2', AssetID: 'A1', AssetName: 'Term Loan', IssuerName: 'Alder Works', ContractID: 'C2', ContractType: 'Funded', Amount: '5' },
+    { LoanPortfolio: 'P1', AssetID: 'A2', AssetName: 'Revolver', ContractID: 'C9', ContractType: 'Funded', Amount: '3' },
+    { LoanPortfolio: 'P1', AssetID: 'A2', AssetName: 'Revolver', ContractID: 'U1', ContractType: 'Unfunded', Amount: '7' },
+  ]);
+  const lineage = { C1: 'IAS-1', C2: 'IAS-1' }; // C1 rolled into C2 today
+  const x = E.lineageExport({ lineage, current });
+  assert.deepEqual(x.rows, [{ LoanContractID: 'C2', IASContractID: 'IAS-1' }]);
+  assert.deepEqual(x.unlinked.map(u => u.contractId), ['C9']);
+  assert.equal(x.expired, 1);
+  assert.equal(x.liveCount, 2);
+  assert.deepEqual(E.lineageExport({ lineage, current, liveOnly: false }).rows.map(r => r.LoanContractID), ['C1', 'C2']);
+  const csv = E.toCSV(x.rows, E.LAYOUTS.lineage);
+  assert.deepEqual(E.normalizeLineage(E.parseCSV(csv)), { C2: 'IAS-1' });
+});
