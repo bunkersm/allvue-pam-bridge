@@ -1,8 +1,8 @@
 /*
  * Loan Event Bridge engine.
  *
- * Pure functions with no DOM access: CSV parsing, AllVue event detection and
- * classification, PAM portfolio allocation, and PAM import file rows.
+ * Pure functions with no DOM access: CSV parsing, Loan System event detection and
+ * classification, IAS portfolio allocation, and IAS import file rows.
  * Loads in the browser as window.Engine and in Node via require().
  *
  * All money is held as integer cents to avoid floating point drift.
@@ -24,7 +24,7 @@
 
   // Calendar-day range treated as a regular period for each tenor. A new
   // contract outside its range is a stub or broken period and goes to review,
-  // because PAM accrues on the regular schedule from the SMF attributes.
+  // because IAS accrues on the regular schedule from the SMF attributes.
   const TENOR_DAYS = { '1M': [27, 33], '3M': [88, 94], '6M': [179, 186], '12M': [362, 368] };
 
   const TYPE_LABELS = {
@@ -38,34 +38,34 @@
   // Interest types whose interest is added to principal (PIK) rather than paid in cash.
   const CAPITALIZING = new Set(['CAPITALIZE', 'CAPITALIZED', 'PIK', 'PARTIAL', 'PARTIAL PIK']);
 
-  // Input and output file layouts. The PAM layout is a placeholder until the
+  // Input and output file layouts. The IAS layout is a placeholder until the
   // real import message formats are supplied.
   const LAYOUTS = {
-    allvue: ['AsOfDate', 'AllVuePortfolio', 'AssetID', 'AssetName', 'FacilityType', 'ContractID', 'ContractType',
+    loanSystem: ['AsOfDate', 'LoanPortfolio', 'AssetID', 'AssetName', 'FacilityType', 'ContractID', 'ContractType',
       'StartDate', 'EndDate', 'Amount', 'GlobalAmount', 'Commitment', 'RateType', 'InterestType', 'BaseRate', 'Tenor', 'MarginBps', 'FloorPct',
       'PayFreq', 'ResetFreq', 'DayCount'],
-    trancheMap: ['AssetID', 'PAMTrancheID', 'FacilityType', 'MaturityDate', 'PAMCurrency'],
-    portfolioMap: ['AllVuePortfolio', 'PAMPortfolio', 'Bank', 'BankName', 'CustodyAccount', 'CashBank'],
-    pamPositions: ['AsOfDate', 'PAMPortfolio', 'PAMTrancheID', 'Funded', 'Unfunded'],
-    lineage: ['AllVueContractID', 'PAMContractID'],
+    trancheMap: ['AssetID', 'IASTrancheID', 'FacilityType', 'MaturityDate', 'IASCurrency'],
+    portfolioMap: ['LoanPortfolio', 'IASPortfolio', 'Bank', 'BankName', 'CustodyAccount', 'CashBank'],
+    iasPositions: ['AsOfDate', 'IASPortfolio', 'IASTrancheID', 'Funded', 'Unfunded'],
+    lineage: ['LoanContractID', 'IASContractID'],
 
-    fees: ['AllVuePortfolio', 'AssetID', 'AssetName', 'FacilityType', 'FeeType', 'PeriodStart', 'PeriodEnd',
-      'FeeRateBps', 'AverageUnfunded', 'DayCount', 'Amount', 'AllVueTransactionID'],
-    pamFeeImport: ['BatchID', 'Seq', 'FeeKey', 'TransactionType', 'FeeType', 'PAMPortfolio', 'PAMTrancheID',
-      'PeriodStart', 'PeriodEnd', 'Amount', 'AllVueTransactionID'],
+    fees: ['LoanPortfolio', 'AssetID', 'AssetName', 'FacilityType', 'FeeType', 'PeriodStart', 'PeriodEnd',
+      'FeeRateBps', 'AverageUnfunded', 'DayCount', 'Amount', 'LoanTransactionID'],
+    iasFeeImport: ['BatchID', 'Seq', 'FeeKey', 'TransactionType', 'FeeType', 'IASPortfolio', 'IASTrancheID',
+      'PeriodStart', 'PeriodEnd', 'Amount', 'LoanTransactionID'],
   };
 
-  // PAM message settings taken from PAM's samples. Security ID type 3 is the
+  // IAS message settings taken from IAS's samples. Security ID type 3 is the
   // facility (tranche) and 26 a contract.
-  const PAM = {
+  const IAS = {
     facilityIdType: 3,
     contractIdType: 26,
     settlementMethod: 11,
     tradePrice: '100.0000000',
-    // BANKLOANACTION types. Split and combine are from PAM's samples; the
-    // paydown, draw and capitalization codes are from PAM's type list and
+    // BANKLOANACTION types. Split and combine are from IAS's samples; the
+    // paydown, draw and capitalization codes are from IAS's type list and
     // still need confirming.
-    // Drawdowns take unfunded lots in this order (F, assumed FIFO, from PAM's export).
+    // Drawdowns take unfunded lots in this order (F, assumed FIFO, from IAS's export).
     unfundedTakedown: 'F',
     actionType: { CONTRACT_SPLIT: 8, CONTRACT_COMBINE: 9, PAYDOWN: 6, DRAW: 4, CAPITALIZE: 10 },
   };
@@ -73,7 +73,7 @@
   // A fee may differ from rate x average unfunded x days / basis by the larger of
   // these before it goes to review: $1.00 or 0.1% of the expected amount.
   const FEE_TOLERANCE = { cents: 100, share: 0.001 };
-  // PAM's current unfunded position may differ from AllVue's average unfunded for the
+  // IAS's current unfunded position may differ from the Loan System's average unfunded for the
   // period by this share before the split by fund is flagged as possibly stale.
   const FEE_POSITION_DRIFT = 0.10;
 
@@ -144,7 +144,7 @@
     return `${sign}${whole}.${String(abs % 100).padStart(2, '0')}`;
   }
 
-  /** Accepts ISO dates and US M/D/YYYY dates (common in AllVue exports). */
+  /** Accepts ISO dates and US M/D/YYYY dates (common in Loan System exports). */
   function normalizeDate(value) {
     const s = String(value ?? '').trim();
     let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
@@ -162,10 +162,10 @@
 
   /**
    * Internal contract rows. Optional columns: SpreadAdjBps (added to the margin
-   * when addSpreadAdjustment is on, since PAM can't hold a base rate adjustment),
+   * when addSpreadAdjustment is on, since IAS can't hold a base rate adjustment),
    * CapPct, AllInRate.
    */
-  function normalizeAllVue(rows, { addSpreadAdjustment = true } = {}) {
+  function normalizeLoanSystem(rows, { addSpreadAdjustment = true } = {}) {
     return rows.map(r => {
       const contractType = String(r.ContractType || '').trim().toLowerCase();
       const kind = contractType.startsWith('unfund') ? 'unfunded' : contractType === 'lc' ? 'lc' : contractType === 'other' ? 'other' : 'funded';
@@ -173,10 +173,10 @@
       return {
         kind,
         asOfDate: normalizeDate(r.AsOfDate),
-        allvuePortfolio: String(r.AllVuePortfolio || '').trim(),
+        loanPortfolio: String(r.LoanPortfolio || '').trim(),
         assetId: String(r.AssetID || '').trim(),
         assetName: String(r.AssetName || r.AssetID || '').trim(),
-        // Display names (optional): AllVue portfolioName and legalEntityName.
+        // Display names (optional): Loan System portfolioName and legalEntityName.
         portfolioName: String(r.PortfolioName || '').trim(),
         issuerName: String(r.IssuerName || '').trim(),
         facilityType: String(r.FacilityType || '').trim().toUpperCase(),
@@ -205,9 +205,9 @@
 
   const round3 = n => Math.round(n * 1000) / 1000;
 
-  // ---------------------------------------------------------------- AllVue contracts report
+  // ---------------------------------------------------------------- Loan System contracts report
 
-  // The AllVue contracts report, one row per portfolio, facility and accrual (contract).
+  // The Loan System contracts report, one row per portfolio, facility and accrual (contract).
   // Headers are matched without brackets or case.
   const REPORT_REQUIRED = ['portfolioId', 'instrumentId', 'primaryIdentifier', 'referenceAccrualId', 'accrualType', 'instrumentSubType',
     'baseRateIndexName', 'rateType', 'interestPaymentType', 'spread', 'spreadAdjustment', 'rateFloor', 'dayCount',
@@ -223,7 +223,7 @@
 
   const headerKey = h => String(h).replace(/[[\]\s]/g, '').toLowerCase();
 
-  function isAllVueReport(headers) {
+  function isLoanReport(headers) {
     return (headers || []).some(h => headerKey(h) === 'referenceaccrualid');
   }
 
@@ -243,11 +243,11 @@
   const pct = v => (v === undefined || String(v).trim() === '' ? 0 : Number(v));
 
   /**
-   * Converts the AllVue contracts report into the app's contract rows. Rates in
+   * Converts the Loan System contracts report into the app's contract rows. Rates in
    * the report are decimals (0.05 = 5%). Returns { rows, notes }; notes list
    * values that were not recognised.
    */
-  function fromAllVueReport(reportRows, { asOfDate }) {
+  function fromLoanReport(reportRows, { asOfDate }) {
     const notes = new Set();
     const get = (r, k) => {
       const key = Object.keys(r).find(x => headerKey(x) === k.toLowerCase());
@@ -268,7 +268,7 @@
       const payFreq = funded ? (REPORT_PAYMENTS[Number(payments)] || (payments ? `${payments} per year` : '')) : '';
       return {
         AsOfDate: asOfDate,
-        AllVuePortfolio: get(r, 'portfolioId'),
+        LoanPortfolio: get(r, 'portfolioId'),
         AssetID: get(r, 'primaryIdentifier'),
         AssetName: get(r, 'instrumentName') || get(r, 'primaryIdentifier'),
         IssuerName: get(r, 'legalEntityName'),
@@ -299,10 +299,10 @@
     const totals = new Map();
     rows.forEach(r => {
       if (!['Funded', 'Unfunded', 'LC'].includes(r.ContractType)) return;
-      const k = `${r.AllVuePortfolio}|${r.AssetID}`;
+      const k = `${r.LoanPortfolio}|${r.AssetID}`;
       totals.set(k, (totals.get(k) || 0) + toCents(r.Amount));
     });
-    rows.forEach(r => { r.Commitment = fromCents(totals.get(`${r.AllVuePortfolio}|${r.AssetID}`) || 0); });
+    rows.forEach(r => { r.Commitment = fromCents(totals.get(`${r.LoanPortfolio}|${r.AssetID}`) || 0); });
     return { rows, notes: [...notes] };
   }
 
@@ -311,22 +311,22 @@
     rows.forEach(r => {
       if (r.AssetID) {
         map[r.AssetID.trim()] = {
-          pamTrancheId: r.PAMTrancheID.trim(),
+          iasTrancheId: r.IASTrancheID.trim(),
           facilityType: (r.FacilityType || '').trim().toUpperCase(),
           maturityDate: normalizeDate(r.MaturityDate),
-          currency: (r.PAMCurrency || '').trim(),
+          currency: (r.IASCurrency || '').trim(),
         };
       }
     });
     return map;
   }
 
-  /** Bank and custody details per PAM portfolio, used in each portfolio message's BNK(). */
+  /** Bank and custody details per IAS portfolio, used in each portfolio message's BNK(). */
   function normalizePortfolioAccounts(rows) {
     const map = {};
     rows.forEach(r => {
-      const pam = (r.PAMPortfolio || '').trim();
-      if (pam) map[pam] = { bank: (r.Bank || '').trim(), bankName: (r.BankName || '').trim(), custodyAccount: (r.CustodyAccount || '').trim(), cashBank: (r.CashBank || '').trim() };
+      const ias = (r.IASPortfolio || '').trim();
+      if (ias) map[ias] = { bank: (r.Bank || '').trim(), bankName: (r.BankName || '').trim(), custodyAccount: (r.CustodyAccount || '').trim(), cashBank: (r.CashBank || '').trim() };
     });
     return map;
   }
@@ -334,18 +334,18 @@
   function normalizePortfolioMap(rows) {
     const map = {};
     rows.forEach(r => {
-      const av = (r.AllVuePortfolio || '').trim();
+      const av = (r.LoanPortfolio || '').trim();
       if (!av) return;
-      (map[av] = map[av] || []).push(r.PAMPortfolio.trim());
+      (map[av] = map[av] || []).push(r.IASPortfolio.trim());
     });
     return map;
   }
 
-  function normalizePamPositions(rows) {
+  function normalizeIasPositions(rows) {
     return rows.map(r => ({
       asOfDate: normalizeDate(r.AsOfDate),
-      pamPortfolio: r.PAMPortfolio.trim(),
-      pamTrancheId: r.PAMTrancheID.trim(),
+      iasPortfolio: r.IASPortfolio.trim(),
+      iasTrancheId: r.IASTrancheID.trim(),
       funded: toCents(r.Funded),
       unfunded: toCents(r.Unfunded),
     }));
@@ -353,7 +353,7 @@
 
   function normalizeLineage(rows) {
     const map = {};
-    rows.forEach(r => { if (r.AllVueContractID) map[r.AllVueContractID.trim()] = r.PAMContractID.trim(); });
+    rows.forEach(r => { if (r.LoanContractID) map[r.LoanContractID.trim()] = r.IASContractID.trim(); });
     return map;
   }
 
@@ -395,14 +395,18 @@
       .map(f => ({ field: f, label: TERM_LABELS[f], from: a[f], to: b[f] }));
   }
 
-  const ROUTE_ORDER = { exception: 0, review: 1, auto: 2, trade: 3 };
+  const ROUTE_ORDER = { exception: 0, review: 1, auto_approve: 2, auto: 3, trade: 4 };
+
+  // A paydown is auto-approved only when each portfolio's change is within this of its
+  // share of the global paydown (agent rounding), in cents.
+  const AUTO_PAYDOWN_SHARE_TOLERANCE = 100;
 
   /**
-   * Checks the run's dates. The PAM holdings must be as of the same date as the
-   * AllVue prior snapshot (both end of the previous business day), and the
-   * AllVue current snapshot must be later. Errors stop the run.
+   * Checks the run's dates. The IAS holdings must be as of the same date as the
+   * Loan System prior snapshot (both end of the previous business day), and the
+   * Loan System current snapshot must be later. Errors stop the run.
    */
-  function checkRunDates({ prior, current, pamPositions }) {
+  function checkRunDates({ prior, current, iasPositions }) {
     const errors = [];
     const warnings = [];
     const one = (rows, name) => {
@@ -411,19 +415,19 @@
       if (dates.length > 1) errors.push(`The ${name} has more than one AsOfDate (${dates.join(', ')}).`);
       return dates[dates.length - 1] || '';
     };
-    const priorDate = one(prior, 'AllVue prior snapshot');
-    const currentDate = one(current, 'AllVue current snapshot');
-    const pamDate = one(pamPositions, 'PAM holdings file');
+    const priorDate = one(prior, 'Loan System prior snapshot');
+    const currentDate = one(current, 'Loan System current snapshot');
+    const iasDate = one(iasPositions, 'IAS holdings file');
     if (priorDate && currentDate && currentDate <= priorDate) {
-      errors.push(`The AllVue current snapshot (${currentDate}) must be later than the prior snapshot (${priorDate}).`);
+      errors.push(`The Loan System current snapshot (${currentDate}) must be later than the prior snapshot (${priorDate}).`);
     }
-    if (pamDate && priorDate && pamDate !== priorDate) {
-      errors.push(`PAM holdings are as of ${pamDate} but the AllVue prior snapshot is as of ${priorDate}. They must be the same date.`);
+    if (iasDate && priorDate && iasDate !== priorDate) {
+      errors.push(`IAS holdings are as of ${iasDate} but the Loan System prior snapshot is as of ${priorDate}. They must be the same date.`);
     }
     if (priorDate && currentDate && daysBetween(priorDate, currentDate) > 4) {
-      warnings.push(`${daysBetween(priorDate, currentDate)} days between the AllVue snapshots. Check that no business day was skipped.`);
+      warnings.push(`${daysBetween(priorDate, currentDate)} days between the Loan System snapshots. Check that no business day was skipped.`);
     }
-    return { priorDate, currentDate, pamDate, errors, warnings };
+    return { priorDate, currentDate, iasDate, errors, warnings };
   }
 
   /** Same day of month (clamped to month end) a number of months away. */
@@ -451,7 +455,7 @@
   }
 
   /**
-   * Compares the prior and current AllVue contract snapshots for each AllVue
+   * Compares the prior and current Loan System contract snapshots for each Loan System
    * portfolio and asset, and returns one classified event per change.
    */
   function detectEvents(input) {
@@ -460,8 +464,11 @@
       trancheMap: input.trancheMap || {},
       portfolioMap: input.portfolioMap || {},
       accounts: input.accounts || {},
-      pamPositions: input.pamPositions || [],
+      iasPositions: input.iasPositions || [],
       lineage: input.lineage || {},
+      // Auto-approval of paydowns that tie out: on unless turned off; maxPct caps the paydown
+      // as a percentage of the facility's global amount (null for no cap).
+      autoApprove: { paydowns: true, maxPct: null, ...(input.autoApprove || {}) },
     };
     // One event per facility: a paydown or restructure happens once to the loan,
     // however many portfolios hold it.
@@ -469,8 +476,8 @@
     const add = (rows, side) => rows.forEach(r => {
       if (!facilities.has(r.assetId)) facilities.set(r.assetId, new Map());
       const byPortfolio = facilities.get(r.assetId);
-      if (!byPortfolio.has(r.allvuePortfolio)) byPortfolio.set(r.allvuePortfolio, { prior: [], current: [] });
-      byPortfolio.get(r.allvuePortfolio)[side].push(r);
+      if (!byPortfolio.has(r.loanPortfolio)) byPortfolio.set(r.loanPortfolio, { prior: [], current: [] });
+      byPortfolio.get(r.loanPortfolio)[side].push(r);
     });
     add(input.prior, 'prior');
     add(input.current, 'current');
@@ -482,6 +489,46 @@
     }
     events.sort((a, b) => ROUTE_ORDER[a.route] - ROUTE_ORDER[b.route] || displayName(a).localeCompare(displayName(b)));
     return events;
+  }
+
+  /**
+   * Unit tie-out for a paydown, per Loan System portfolio: the IAS position before the event
+   * ties to the Loan System, the redemptions sent for its IAS portfolios equal its paydown,
+   * so the IAS position after ties too, and its paydown is its share of the global paydown.
+   */
+  function tiePaydown({ holdings, messages, globalBefore, globalDelta, settings }) {
+    const reasons = [];
+    if (!settings.paydowns) reasons.push('auto-approval of paydowns is turned off in Settings.');
+    const pct = globalBefore > 0 ? -globalDelta / globalBefore * 100 : 0;
+    if (settings.maxPct !== null && settings.maxPct !== undefined && settings.maxPct !== '' && pct > Number(settings.maxPct)) {
+      reasons.push(`the paydown is ${pct.toFixed(2)}% of the global amount, over the ${Number(settings.maxPct)}% limit set in Settings.`);
+    }
+    const globalRedeemed = -messages.filter(m => m.level === 'GLOBAL' && m.type === 'PAYDOWN')
+      .reduce((t, m) => t + m.allocs.reduce((u, a) => u + a.units, 0), 0);
+    if (globalRedeemed !== -globalDelta) reasons.push(`the global action redeems ${formatMoney(globalRedeemed)} but the global amount fell by ${formatMoney(-globalDelta)}.`);
+    const rows = holdings.map(h => {
+      const name = h.portfolioName || h.loanPortfolio;
+      const redeemed = messages.filter(m => m.level === 'PORTFOLIO' && m.type === 'PAYDOWN' && m.loanPortfolio === h.loanPortfolio)
+        .reduce((t, m) => t + m.unitsExchanged, 0);
+      const iasBefore = h.iasFunded ?? 0;
+      const iasAfter = iasBefore - redeemed;
+      const expectedShare = globalBefore > 0 ? Math.round(globalDelta * h.fundedBefore / globalBefore) : 0;
+      const shareDiff = h.delta - expectedShare;
+      const checks = {
+        before: iasBefore === h.fundedBefore,
+        after: iasAfter === h.fundedAfter,
+        share: Math.abs(shareDiff) <= AUTO_PAYDOWN_SHARE_TOLERANCE,
+      };
+      if (!checks.before) reasons.push(`${name}: IAS holds ${formatMoney(iasBefore)} before the event against the Loan System's ${formatMoney(h.fundedBefore)}.`);
+      if (!checks.after) reasons.push(`${name}: IAS would hold ${formatMoney(iasAfter)} after the redemptions against the Loan System's ${formatMoney(h.fundedAfter)}.`);
+      if (!checks.share) reasons.push(`${name}: its paydown of ${formatMoney(-h.delta)} is ${formatMoney(Math.abs(shareDiff))} off its share of the global paydown (${formatMoney(-expectedShare)}), more than the ${formatMoney(AUTO_PAYDOWN_SHARE_TOLERANCE)} allowed for auto-approval.`);
+      return {
+        loanPortfolio: h.loanPortfolio, portfolioName: h.portfolioName,
+        loanBefore: h.fundedBefore, loanAfter: h.fundedAfter, iasBefore, redeemed, iasAfter, expectedShare: -expectedShare, shareDiff,
+        ties: checks.before && checks.after && checks.share,
+      };
+    });
+    return { ok: !reasons.length, reasons, pct, globalPaydown: -globalDelta, globalRedeemed, rows };
   }
 
   /** Issuer and instrument, e.g. "Granite Peak Services Term Loan B". */
@@ -509,7 +556,7 @@
   }
 
   /**
-   * The facility's rows for one side, summed across AllVue portfolios: one row
+   * The facility's rows for one side, summed across Loan System portfolios: one row
    * per contract with your total position. Global amounts are the facility's, so
    * they are taken once and must agree across portfolios.
    */
@@ -561,11 +608,11 @@
     const commitmentBefore = g.prior.length ? g.prior[0].commitment : 0;
     const commitmentAfter = g.current.length ? g.current[0].commitment : 0;
 
-    // Each AllVue portfolio's own holding of the facility.
-    const holdings = [...byPortfolio.entries()].map(([allvuePortfolio, pg]) => {
+    // Each Loan System portfolio's own holding of the facility.
+    const holdings = [...byPortfolio.entries()].map(([loanPortfolio, pg]) => {
       const changes = contractChanges(pg.prior, pg.current);
       return {
-        allvuePortfolio,
+        loanPortfolio,
         portfolioName: (pg.current.find(r => r.portfolioName) || pg.prior.find(r => r.portfolioName) || {}).portfolioName || '',
         rows: pg,
         changes,
@@ -576,8 +623,8 @@
         unfundedAfter: sum(pg.current.filter(r => r.unfunded)),
         isNew: !pg.prior.length && pg.current.length > 0,
       };
-    }).sort((a, b) => (a.portfolioName || a.allvuePortfolio).localeCompare(b.portfolioName || b.allvuePortfolio));
-    const label = h => h.portfolioName || h.allvuePortfolio;
+    }).sort((a, b) => (a.portfolioName || a.loanPortfolio).localeCompare(b.portfolioName || b.loanPortfolio));
+    const label = h => h.portfolioName || h.loanPortfolio;
 
     const anyChange = expired.length || added.length || amended.length || commitmentBefore !== commitmentAfter
       || holdings.some(h => h.delta !== 0 || h.unfundedBefore !== h.unfundedAfter);
@@ -586,7 +633,7 @@
     const fundedDelta = fundedAfter - fundedBefore;
 
     // ---- trades vs loan events. Trades (buys, sells, new purchases) are booked in
-    // PAM by the trade feed. With no change in the facility's global amount, a
+    // IAS by the trade feed. With no change in the facility's global amount, a
     // portfolio's position change is a trade; this app only books what the loan did.
     const gsum = rows => rows.reduce((t, r) => t + r.globalAmount, 0);
     const globalBefore = gsum(priorFunded);
@@ -640,6 +687,10 @@
     const effectiveDate = added.length
       ? added.map(c => c.startDate).sort()[0]
       : ctx.asOfDate || head.asOfDate;
+    // Splits, combines and rolls are dated on the new contracts' start date, which should
+    // also be the day the old contracts end.
+    const startDates = [...new Set(added.map(c => c.startDate))].sort();
+    const endDates = [...new Set(expired.map(c => c.endDate))].sort();
 
     // ---- checks
     const flags = [];
@@ -649,15 +700,15 @@
     const money = formatMoney;
 
     const tranche = ctx.trancheMap[assetId];
-    if (!tranche) exception(`Asset ${assetId} is not mapped to a PAM tranche. Set the tranche up in PAM and add it to the tranche map.`);
-    if (problems.size) exception(`The AllVue portfolios holding this facility disagree on ${[...problems].join(' and ')}. Those are the facility's, so they must match.`);
+    if (!tranche) exception(`Asset ${assetId} is not mapped to an IAS tranche. Set the tranche up in IAS and add it to the tranche map.`);
+    if (problems.size) exception(`The Loan System portfolios holding this facility disagree on ${[...problems].join(' and ')}. Those are the facility's, so they must match.`);
 
     holdings.forEach(h => {
       const rows = h.rows.current;
       if (!rows.length) return;
       const lc = sum(rows.filter(r => r.kind === 'lc'));
       if (h.fundedAfter + h.unfundedAfter + lc !== rows[0].commitment) {
-        exception(`${label(h)}: funded ${money(h.fundedAfter)} plus unfunded ${money(h.unfundedAfter)}${lc ? ` plus letters of credit ${money(lc)}` : ''} does not equal the commitment of ${money(rows[0].commitment)} in the AllVue export.`);
+        exception(`${label(h)}: funded ${money(h.fundedAfter)} plus unfunded ${money(h.unfundedAfter)}${lc ? ` plus letters of credit ${money(lc)}` : ''} does not equal the commitment of ${money(rows[0].commitment)} in the Loan System export.`);
       }
     });
     if (!['TL', 'RC', 'DDTL'].includes(facilityType)) {
@@ -684,7 +735,7 @@
       else review(`Commitment changed from ${money(commitmentBefore)} to ${money(commitmentAfter)}.`);
     }
     if (type === 'COMMITMENT_CHANGE') {
-      review('Commitment-only changes are not generated as PAM messages in this prototype. Book the change in PAM directly.');
+      review('Commitment-only changes are not generated as IAS messages in this prototype. Book the change in IAS directly.');
     }
 
     added.forEach(c => {
@@ -700,30 +751,37 @@
       if (!range || (days >= range[0] && days <= range[1])) return;
       const freq = (c.payFreq || '').toLowerCase();
       if (isNew && days > range[1]) {
-        review(`Initial long: the first contract ${c.contractId} runs ${days} days (${c.startDate} to ${c.endDate}) on a ${c.tenor} tenor. On its ${freq} schedule PAM will expect the first interest payment on ${firstScheduledPayDate(c)}; AllVue's first payment is ${c.endDate}. Apply the PAM fix for initial long periods.`);
+        review(`Initial long: the first contract ${c.contractId} runs ${days} days (${c.startDate} to ${c.endDate}) on a ${c.tenor} tenor. On its ${freq} schedule IAS will expect the first interest payment on ${firstScheduledPayDate(c)}; Loan System's first payment is ${c.endDate}. Apply the IAS fix for initial long periods.`);
       } else if (isNew) {
-        review(`Initial short: the first contract ${c.contractId} runs only ${days} days (${c.startDate} to ${c.endDate}) on a ${c.tenor} tenor. Check that PAM accrues the short first period to ${c.endDate}.`);
+        review(`Initial short: the first contract ${c.contractId} runs only ${days} days (${c.startDate} to ${c.endDate}) on a ${c.tenor} tenor. Check that IAS accrues the short first period to ${c.endDate}.`);
       } else {
-        review(`New contract ${c.contractId} runs ${days} days (${c.startDate} to ${c.endDate}) on a ${c.tenor} tenor. PAM accrues on the regular schedule, so check for a stub or broken period.`);
+        review(`New contract ${c.contractId} runs ${days} days (${c.startDate} to ${c.endDate}) on a ${c.tenor} tenor. IAS accrues on the regular schedule, so check for a stub or broken period.`);
       }
     });
     if (isNew) {
-      info(`New position of ${money(fundedAfter)}. The trade feed books the purchase in PAM; this app sends nothing for it. Link the PAM contract it lands in once the trade has posted.`);
+      info(`New position of ${money(fundedAfter)}. The trade feed books the purchase in IAS; this app sends nothing for it. Link the IAS contract it lands in once the trade has posted.`);
     }
     holdings.filter(h => h.tradeDelta !== 0).forEach(h => {
       const what = h.isNew ? `a new holding of ${money(h.fundedAfter)}` : `a ${h.tradeDelta < 0 ? 'sale' : 'purchase'} of ${money(Math.abs(h.tradeDelta))}`;
       if (restructured) {
-        review(`${label(h)}: ${what} on the same day as this restructure. Its messages below move the holdings as they were before the trade; the trade feed books the trade separately. Check the amounts once the trade has posted in PAM.`);
+        review(`${label(h)}: ${what} on the same day as this restructure. Its messages below move the holdings as they were before the trade; the trade feed books the trade separately. Check the amounts once the trade has posted in IAS.`);
       } else {
-        info(`${label(h)}: ${what} while the facility's global amount didn't change. The trade feed books it in PAM; this app sends nothing for it.`);
+        info(`${label(h)}: ${what} while the facility's global amount didn't change. The trade feed books it in IAS; this app sends nothing for it.`);
       }
     });
+
+    if (!isNew && startDates.length > 1) {
+      review(`The new contracts start on different dates (${startDates.join(', ')}). All IAS messages for this event are dated ${effectiveDate}, the earliest. Check each contract's start date against the agent notice.`);
+    }
+    if (expired.length && added.length && endDates.some(d => d !== effectiveDate)) {
+      review(`Contract ${expired.filter(c => c.endDate !== effectiveDate).map(c => `${c.contractId} ends ${c.endDate}`).join(', ')}, but the new contracts start ${effectiveDate}. The ${TYPE_LABELS[type].toLowerCase()} is dated ${effectiveDate}; check for a gap or overlap in accrual.`);
+    }
 
     if (type === 'COMPLEX') {
       review(`${expired.length} contracts roll into ${added.length}. Booked as a combine into contract ${added[0].contractId}, then a split out to the others. Check the amounts against the agent notice.`);
     }
     if (type === 'REPAYMENT' && !g.current.length) {
-      review('The position is no longer in the AllVue export. If it was repaid, approve. If it was sold or transferred, the trade feed books it: reject.');
+      review('The position is no longer in the Loan System export. If it was repaid, approve. If it was sold or transferred, the trade feed books it: reject.');
     }
     if (rollsAtPeriodEnd && amended.length) {
       info('Other contracts on this tranche also changed and are included in this event.');
@@ -732,9 +790,9 @@
       info(`The ${bookedDelta < 0 ? 'paydown' : 'draw'} is booked after the restructure, spread across the new contracts in proportion to their size.`);
     }
 
-    // ---- global amounts: needed for PAM's global actions.
+    // ---- global amounts: needed for IAS's global actions.
     if (missingGlobal.length) {
-      exception(`No global amount for contract ${[...new Set(missingGlobal.map(c => c.contractId))].join(', ')}. PAM's global action needs it.`);
+      exception(`No global amount for contract ${[...new Set(missingGlobal.map(c => c.contractId))].join(', ')}. IAS's global action needs it.`);
     } else if (globalBefore > 0 && g.current.length && globalDelta !== 0) {
       holdings.filter(h => !h.isNew && h.fundedBefore > 0).forEach(h => {
         const expectedDelta = Math.round(globalDelta * h.fundedBefore / globalBefore);
@@ -744,54 +802,54 @@
       });
     }
 
-    const pamIdOf = c => ctx.lineage[c.contractId] || '';
+    const iasIdOf = c => ctx.lineage[c.contractId] || '';
     [...expired, ...amended.map(a => a.prev)].forEach(c => {
-      if (!pamIdOf(c)) exception(`AllVue contract ${c.contractId} has no linked PAM contract in the lineage table.`);
+      if (!iasIdOf(c)) exception(`Loan System contract ${c.contractId} has no linked IAS contract in the lineage table.`);
     });
 
-    // ---- per AllVue portfolio: PAM tie-out, allocation basis, same contracts as the facility
+    // ---- per Loan System portfolio: IAS tie-out, allocation basis, same contracts as the facility
     const idSet = list => list.map(c => c.contractId).sort().join('+');
     holdings.forEach(h => {
-      h.pamPortfolios = ctx.portfolioMap[h.allvuePortfolio] || [];
+      h.iasPortfolios = ctx.portfolioMap[h.loanPortfolio] || [];
       h.basis = [];
-      if (!h.pamPortfolios.length) { exception(`AllVue portfolio ${label(h)} has no PAM portfolios in the portfolio map.`); return; }
+      if (!h.iasPortfolios.length) { exception(`Loan System portfolio ${label(h)} has no IAS portfolios in the portfolio map.`); return; }
       if (!tranche) return;
-      h.basis = h.pamPortfolios.map(pp => {
-        const pos = ctx.pamPositions.find(p => p.pamPortfolio === pp && p.pamTrancheId === tranche.pamTrancheId);
+      h.basis = h.iasPortfolios.map(pp => {
+        const pos = ctx.iasPositions.find(p => p.iasPortfolio === pp && p.iasTrancheId === tranche.iasTrancheId);
         const funded = pos ? pos.funded : 0;
         const unfunded = pos ? pos.unfunded : 0;
-        return { allvuePortfolio: h.allvuePortfolio, pamPortfolio: pp, funded, unfunded, weight: funded + unfunded };
+        return { loanPortfolio: h.loanPortfolio, iasPortfolio: pp, funded, unfunded, weight: funded + unfunded };
       });
-      h.pamFunded = h.basis.reduce((t, b) => t + b.funded, 0);
-      h.pamUnfunded = h.basis.reduce((t, b) => t + b.unfunded, 0);
-      h.ties = h.pamFunded === h.fundedBefore && h.pamUnfunded === h.unfundedBefore;
+      h.iasFunded = h.basis.reduce((t, b) => t + b.funded, 0);
+      h.iasUnfunded = h.basis.reduce((t, b) => t + b.unfunded, 0);
+      h.ties = h.iasFunded === h.fundedBefore && h.iasUnfunded === h.unfundedBefore;
       if (h.isNew) return;
       if (h.basis.every(b => b.weight === 0) && h.fundedBefore + h.unfundedBefore > 0) {
-        exception(`${label(h)}: no PAM positions in tranche ${tranche.pamTrancheId} for ${h.pamPortfolios.join(', ')}.`);
+        exception(`${label(h)}: no IAS positions in tranche ${tranche.iasTrancheId} for ${h.iasPortfolios.join(', ')}.`);
         return;
       }
-      if (h.pamFunded !== h.fundedBefore) {
-        exception(`${label(h)}: PAM funded position of ${money(h.pamFunded)} does not tie to AllVue's ${money(h.fundedBefore)} before this event (difference ${money(h.pamFunded - h.fundedBefore)}). Clear the break before booking.`);
+      if (h.iasFunded !== h.fundedBefore) {
+        exception(`${label(h)}: IAS funded position of ${money(h.iasFunded)} does not tie to the Loan System's ${money(h.fundedBefore)} before this event (difference ${money(h.iasFunded - h.fundedBefore)}). Clear the break before booking.`);
       }
-      if (h.pamUnfunded !== h.unfundedBefore) {
-        exception(`${label(h)}: PAM unfunded position of ${money(h.pamUnfunded)} does not tie to AllVue's ${money(h.unfundedBefore)} before this event.`);
+      if (h.iasUnfunded !== h.unfundedBefore) {
+        exception(`${label(h)}: IAS unfunded position of ${money(h.iasUnfunded)} does not tie to the Loan System's ${money(h.unfundedBefore)} before this event.`);
       }
       if (h.changes.currentFunded.length && h.changes.priorFunded.length
         && (idSet(h.changes.expired) !== idSet(expired) || idSet(h.changes.added) !== idSet(added))) {
-        exception(`${label(h)} holds different contracts from the rest of the facility, so one set of PAM messages can't cover it.`);
+        exception(`${label(h)} holds different contracts from the rest of the facility, so one set of IAS messages can't cover it.`);
       }
     });
 
-    // ---- PAM messages: the contract create and global actions once for the facility,
-    // portfolio transactions per AllVue portfolio from its own holding.
+    // ---- IAS messages: the contract create and global actions once for the facility,
+    // portfolio transactions per Loan System portfolio from its own holding.
     const newIdOf = c => {
-      // New PAM contracts take the AllVue contract ID, unless PAM already uses that ID for the old contract.
-      const pamId = pamIdOf(c);
-      return pamId === c.contractId ? `${c.contractId}-${effectiveDate.replace(/-/g, '')}` : c.contractId;
+      // New IAS contracts take the Loan System contract ID, unless IAS already uses that ID for the old contract.
+      const iasId = iasIdOf(c);
+      return iasId === c.contractId ? `${c.contractId}-${effectiveDate.replace(/-/g, '')}` : c.contractId;
     };
     // Trades and new purchases are the trade feed's: only the loan's own change is planned.
     const planType = isNew ? 'NEW_POSITION' : type === 'TRADE' ? (expired.length === 1 && added.length === 1 ? 'ROLLOVER' : 'NONE') : type;
-    const plan = buildPlan({ type: planType, expired, added, amended: planAmended, fundedDelta: bookedDelta, globalDelta: isTrade && globalDelta === 0 ? 0 : globalDelta, capitalizing, pamIdOf, newIdOf });
+    const plan = buildPlan({ type: planType, expired, added, amended: planAmended, fundedDelta: bookedDelta, globalDelta: isTrade && globalDelta === 0 ? 0 : globalDelta, capitalizing, iasIdOf, newIdOf });
 
     const key = [
       assetId, effectiveDate,
@@ -800,11 +858,11 @@
     ].join('|').replace(/\|$/, '');
 
     holdings.forEach(h => {
-      h.weights = h.basis.filter(b => b.weight > 0).map(b => ({ key: b.pamPortfolio, weight: b.weight }));
+      h.weights = h.basis.filter(b => b.weight > 0).map(b => ({ key: b.iasPortfolio, weight: b.weight }));
       if (!tranche || h.isNew || !h.weights.length) return;
       const pc = h.changes;
       const pAmended = h.tradeDelta !== 0 ? pc.amended.map(a => ({ ...a, amountDelta: 0 })) : pc.amended;
-      h.plan = buildPlan({ type: planType, expired: pc.expired, added: pc.added, amended: pAmended, fundedDelta: h.bookedDelta, globalDelta: 0, capitalizing, pamIdOf, newIdOf });
+      h.plan = buildPlan({ type: planType, expired: pc.expired, added: pc.added, amended: pAmended, fundedDelta: h.bookedDelta, globalDelta: 0, capitalizing, iasIdOf, newIdOf });
       h.plan.steps.forEach(step => allocateStep(step, h.weights));
     });
 
@@ -813,19 +871,19 @@
     if (tranche) {
       const per = (kind, field) => {
         const totals = {};
-        messages.filter(m => m.level === 'PORTFOLIO' && m.type === kind).forEach(m => { totals[m.pamPortfolio] = (totals[m.pamPortfolio] || 0) + m.unitsExchanged; });
+        messages.filter(m => m.level === 'PORTFOLIO' && m.type === kind).forEach(m => { totals[m.iasPortfolio] = (totals[m.iasPortfolio] || 0) + m.unitsExchanged; });
         Object.entries(totals).forEach(([pp, units]) => {
-          const b = allocationBasis.find(x => x.pamPortfolio === pp);
-          if (b && units > b[field]) exception(`${pp} would ${kind === 'PAYDOWN' ? 'redeem' : 'draw'} ${money(units)} but holds ${money(b[field])} ${field} in PAM.`);
+          const b = allocationBasis.find(x => x.iasPortfolio === pp);
+          if (b && units > b[field]) exception(`${pp} would ${kind === 'PAYDOWN' ? 'redeem' : 'draw'} ${money(units)} but holds ${money(b[field])} ${field} in IAS.`);
         });
       };
       per('PAYDOWN', 'funded');
       per('DRAW', 'unfunded');
     }
     if (messages.some(m => m.level === 'PORTFOLIO' && !m.manual)) {
-      const used = [...new Set(messages.filter(m => m.level === 'PORTFOLIO').map(m => m.pamPortfolio))];
+      const used = [...new Set(messages.filter(m => m.level === 'PORTFOLIO').map(m => m.iasPortfolio))];
       const noBank = used.filter(pp => !(ctx.accounts[pp] && ctx.accounts[pp].bank && ctx.accounts[pp].custodyAccount));
-      if (noBank.length) exception(`No bank or custody account for ${noBank.join(', ')} in the portfolio map. PAM's portfolio messages need them.`);
+      if (noBank.length) exception(`No bank or custody account for ${noBank.join(', ')} in the portfolio map. IAS's portfolio messages need them.`);
     }
     messages.filter(m => m.level === 'SMF').forEach(m => m.inputs.forEach(input => {
       const v = validateContractAdd(input);
@@ -833,56 +891,69 @@
       v.warnings.forEach(w => info(`Contract create for ${input.contract_id}: ${w}`));
     }));
     if (messages.some(m => m.manual && m.level === 'PORTFOLIO')) {
-      info('Book the portfolio capitalized interest transactions in PAM after loading the file. Their message format hasn\'t been added yet.');
+      info('Book the portfolio capitalized interest transactions in IAS after loading the file. Their message format hasn\'t been added yet.');
     }
     const allocations = holdings.filter(h => h.plan).map(h => ({
-      allvuePortfolio: h.allvuePortfolio, portfolioName: h.portfolioName, basis: h.basis,
+      loanPortfolio: h.loanPortfolio, portfolioName: h.portfolioName, basis: h.basis,
       lines: h.plan.steps.flatMap(step => step.lines),
     }));
     const lines = allocations.flatMap(a => a.lines);
 
     const hasException = flags.some(f => f.level === 'exception');
     const hasReview = flags.some(f => f.level === 'review');
+
+    // ---- paydown auto-approval: a paydown with nothing else going on (alone, or at a clean roll)
+    // is approved without a person when every portfolio's units tie out before and after.
+    const isPaydown = !isTrade && !amended.some(a => a.diffs.length)
+      && (type === 'PAYDOWN' || (type === 'ROLLOVER' && legs.length === 1 && legs[0] === 'PAYDOWN'));
+    const paydownTieOut = isPaydown && tranche && !hasException
+      ? tiePaydown({ holdings, messages, globalBefore, globalDelta, settings: ctx.autoApprove })
+      : null;
+    if (paydownTieOut && !paydownTieOut.ok && !hasReview) {
+      info(`Not auto-approved: ${paydownTieOut.reasons.join(' ')}`);
+    }
+
     const route = hasException ? 'exception'
       : hasReview ? 'review'
         : (type === 'TRADE' || type === 'NEW_POSITION') ? 'trade'
           : type === 'ROLLOVER' && !legs.length && !amended.length ? 'auto'
-            : 'review';
+            : paydownTieOut && paydownTieOut.ok ? 'auto_approve'
+              : 'review';
 
     return {
       key, assetId, assetName, issuerName, facilityType, effectiveDate,
-      allvuePortfolios: holdings.map(h => h.allvuePortfolio),
+      loanPortfolios: holdings.map(h => h.loanPortfolio),
       holdings: holdings.map(h => ({
-        allvuePortfolio: h.allvuePortfolio, portfolioName: h.portfolioName,
+        loanPortfolio: h.loanPortfolio, portfolioName: h.portfolioName,
         fundedBefore: h.fundedBefore, fundedAfter: h.fundedAfter, unfundedBefore: h.unfundedBefore, unfundedAfter: h.unfundedAfter,
-        tradeDelta: h.tradeDelta, isNew: h.isNew, pamPortfolios: h.pamPortfolios || [],
-        pamFunded: h.pamFunded ?? null, pamUnfunded: h.pamUnfunded ?? null, ties: h.ties ?? null,
+        tradeDelta: h.tradeDelta, isNew: h.isNew, iasPortfolios: h.iasPortfolios || [],
+        iasFunded: h.iasFunded ?? null, iasUnfunded: h.iasUnfunded ?? null, ties: h.ties ?? null,
       })),
-      type, typeLabel: TYPE_LABELS[type], legs, route, flags,
+      type, typeLabel: TYPE_LABELS[type], legs, route, flags, paydownTieOut,
       expired, added, amended, unchanged, rollTermChanges,
       totals: { fundedBefore, fundedAfter, fundedDelta, bookedDelta, unfundedBefore, unfundedAfter, commitmentBefore, commitmentAfter, globalBefore, globalAfter, globalDelta },
       isTrade, isNew,
-      pamTrancheId: tranche ? tranche.pamTrancheId : '',
+      iasTrancheId: tranche ? tranche.iasTrancheId : '',
       allocationBasis, allocations, creates: plan.creates, steps: plan.steps, lines, messages, lineageUpdates: plan.lineage,
     };
   }
 
   /**
-   * Works out what PAM has to do for an event, in PAM's order:
+   * Works out what IAS has to do for an event, in IAS's order:
    *   1. create each new contract in the security master,
    *   2. move units: a combine and/or a split (many → many is a combine into the
    *      first new contract, then a split out to the others),
    *   3. paydown or draw on the resulting contracts.
    * Each step in 2 and 3 becomes one global action per line plus portfolio
-   * transactions. PAM closes emptied contracts itself, so there are no closes.
+   * transactions. IAS closes emptied contracts itself, so there are no closes.
    */
-  function buildPlan({ type, expired, added, amended, fundedDelta, globalDelta, capitalizing, pamIdOf, newIdOf }) {
+  function buildPlan({ type, expired, added, amended, fundedDelta, globalDelta, capitalizing, iasIdOf, newIdOf }) {
     const creates = [];
     const steps = [];
     const lineage = [];
     const step = (action, lines) => { if (lines.length) steps.push({ action, lines }); };
     const line = (messageType, fromId, toId, amount, globalAmount, note) => ({ messageType, fromId, toId, amount, globalAmount, note });
-    const create = c => { const id = newIdOf(c); creates.push({ ...c, pamContractId: id }); lineage.push({ allvueContractId: c.contractId, pamContractId: id }); return id; };
+    const create = c => { const id = newIdOf(c); creates.push({ ...c, iasContractId: id }); lineage.push({ loanContractId: c.contractId, iasContractId: id }); return id; };
 
     // Amount change after the restructure, spread over the target contracts by size.
     const legs = (targets, note) => {
@@ -907,16 +978,16 @@
     switch (type) {
       case 'ROLLOVER': {
         if (!expired.length || !added.length) break;
-        // Same terms: the PAM contract carries on, so only an amount change is booked.
-        const pamId = pamIdOf(expired[0]);
-        lineage.push({ allvueContractId: added[0].contractId, pamContractId: pamId });
-        legs([{ id: pamId, amount: added[0].amount, globalAmount: added[0].globalAmount }], fundedDelta < 0 ? 'Paydown at rollover' : 'Draw at rollover');
+        // Same terms: the IAS contract carries on, so only an amount change is booked.
+        const iasId = iasIdOf(expired[0]);
+        lineage.push({ loanContractId: added[0].contractId, iasContractId: iasId });
+        legs([{ id: iasId, amount: added[0].amount, globalAmount: added[0].globalAmount }], fundedDelta < 0 ? 'Paydown at rollover' : 'Draw at rollover');
         break;
       }
       case 'CONTRACT_CHANGE':
         if (expired.length && added.length) {
           const id = create(added[0]);
-          step('CONTRACT_SPLIT', [line('CONTRACT_SPLIT', pamIdOf(expired[0]), id, expired[0].amount, expired[0].globalAmount, 'New terms: 1:1 split to the new contract')]);
+          step('CONTRACT_SPLIT', [line('CONTRACT_SPLIT', iasIdOf(expired[0]), id, expired[0].amount, expired[0].globalAmount, 'New terms: 1:1 split to the new contract')]);
           legs([{ id, amount: added[0].amount, globalAmount: added[0].globalAmount }], fundedDelta < 0 ? 'Paydown after the split' : 'Draw after the split');
         }
         break;
@@ -924,14 +995,14 @@
         if (!expired.length || !added.length) break;
         const ids = added.map(create);
         const pre = spread(added);
-        step('CONTRACT_SPLIT', added.map((c, i) => line('CONTRACT_SPLIT', pamIdOf(expired[0]), ids[i], pre[i].amount, pre[i].globalAmount, `Split into ${c.tenor} contract ${c.contractId}`)));
+        step('CONTRACT_SPLIT', added.map((c, i) => line('CONTRACT_SPLIT', iasIdOf(expired[0]), ids[i], pre[i].amount, pre[i].globalAmount, `Split into ${c.tenor} contract ${c.contractId}`)));
         legs(added.map((c, i) => ({ id: ids[i], amount: c.amount, globalAmount: c.globalAmount })), fundedDelta < 0 ? 'Paydown after the split' : 'Draw after the split');
         break;
       }
       case 'COMBINE': {
         if (!expired.length || !added.length) break;
         const id = create(added[0]);
-        step('CONTRACT_COMBINE', expired.map(c => line('CONTRACT_COMBINE', pamIdOf(c), id, c.amount, c.globalAmount, `Combine ${c.contractId} into ${added[0].contractId}`)));
+        step('CONTRACT_COMBINE', expired.map(c => line('CONTRACT_COMBINE', iasIdOf(c), id, c.amount, c.globalAmount, `Combine ${c.contractId} into ${added[0].contractId}`)));
         legs([{ id, amount: added[0].amount, globalAmount: added[0].globalAmount }], fundedDelta < 0 ? 'Paydown after the combine' : 'Draw after the combine');
         break;
       }
@@ -939,7 +1010,7 @@
         if (!expired.length || !added.length) break;
         const ids = added.map(create);
         const pre = spread(added);
-        step('CONTRACT_COMBINE', expired.map(c => line('CONTRACT_COMBINE', pamIdOf(c), ids[0], c.amount, c.globalAmount, `Combine ${c.contractId} into ${added[0].contractId}`)));
+        step('CONTRACT_COMBINE', expired.map(c => line('CONTRACT_COMBINE', iasIdOf(c), ids[0], c.amount, c.globalAmount, `Combine ${c.contractId} into ${added[0].contractId}`)));
         step('CONTRACT_SPLIT', added.slice(1).map((c, j) => line('CONTRACT_SPLIT', ids[0], ids[j + 1], pre[j + 1].amount, pre[j + 1].globalAmount, `Split from ${added[0].contractId} into ${c.contractId}`)));
         legs(added.map((c, i) => ({ id: ids[i], amount: c.amount, globalAmount: c.globalAmount })), fundedDelta < 0 ? 'Paydown after the restructure' : 'Draw after the restructure');
         break;
@@ -950,7 +1021,7 @@
         break;
       }
       case 'REPAYMENT':
-        step('PAYDOWN', expired.map(c => line('PAYDOWN', pamIdOf(c), '', c.amount, c.globalAmount, 'Repaid in full')));
+        step('PAYDOWN', expired.map(c => line('PAYDOWN', iasIdOf(c), '', c.amount, c.globalAmount, 'Repaid in full')));
         break;
       default:
         break;
@@ -959,10 +1030,10 @@
     // Mid-period changes to contracts that did not roll.
     amended.forEach(a => {
       const gDelta = a.cur.globalAmount - a.prev.globalAmount;
-      let id = pamIdOf(a.prev);
+      let id = iasIdOf(a.prev);
       if (a.diffs.length) {
         id = create(a.cur);
-        step('CONTRACT_SPLIT', [line('CONTRACT_SPLIT', pamIdOf(a.prev), id, a.prev.amount, a.prev.globalAmount, 'Mid-period term change: 1:1 split to a new contract')]);
+        step('CONTRACT_SPLIT', [line('CONTRACT_SPLIT', iasIdOf(a.prev), id, a.prev.amount, a.prev.globalAmount, 'Mid-period term change: 1:1 split to a new contract')]);
       }
       if (a.amountDelta < 0) step('PAYDOWN', [line('PAYDOWN', id, '', -a.amountDelta, -gDelta, 'Mid-period paydown')]);
       if (a.amountDelta > 0) {
@@ -974,10 +1045,10 @@
   }
 
   /**
-   * Splits each line of a step across PAM portfolios. Lines that split one
+   * Splits each line of a step across IAS portfolios. Lines that split one
    * source contract into several are allocated together so that each
    * portfolio's pieces add back to its holding of the source and each target
-   * contract adds back to its AllVue amount.
+   * contract adds back to its Loan System amount.
    */
   function allocateStep(step, weights) {
     const bySource = new Map();
@@ -1002,26 +1073,26 @@
   }
 
   /**
-   * PAM messages in load order:
+   * IAS messages in load order:
    *   - one contract create (security master) for the facility's new contracts,
    *   - per step, one BANKLOANACTION global action for the facility with signed
    *     global units per contract (sources negative, targets positive),
-   *   - then that step's portfolio transactions for every PAM portfolio holding
-   *     the facility, from each AllVue portfolio's own plan.
-   * Messages whose PAM format hasn't been supplied yet are marked manual and
+   *   - then that step's portfolio transactions for every IAS portfolio holding
+   *     the facility, from each Loan System portfolio's own plan.
+   * Messages whose IAS format hasn't been supplied yet are marked manual and
    * left out of the file. onProblem reports a portfolio whose plan doesn't line
    * up with the facility's steps.
    */
   function facilityMessages(plan, holdings, { effectiveDate, tranche, accounts }, onProblem) {
     const out = [];
     let stepNo = 0;
-    const common = { facilityId: tranche.pamTrancheId, effectiveDate, maturityDate: tranche.maturityDate };
+    const common = { facilityId: tranche.iasTrancheId, effectiveDate, maturityDate: tranche.maturityDate };
     if (plan.creates.length) {
       stepNo++;
       out.push({
         ...common, step: stepNo, level: 'SMF', type: 'CONTRACT_CREATE',
-        contractId: plan.creates.map(c => c.pamContractId).join(', '),
-        contractIds: plan.creates.map(c => c.pamContractId),
+        contractId: plan.creates.map(c => c.iasContractId).join(', '),
+        contractIds: plan.creates.map(c => c.iasContractId),
         inputs: plan.creates.map(c => contractAddInput(c, tranche)),
       });
     }
@@ -1037,23 +1108,23 @@
         else { add(l.fromId, -l.globalAmount); add(l.toId, l.globalAmount); }
       });
       const recs = [...net.entries()].filter(([, u]) => u !== 0).map(([contractId, units]) => ({ contractId, units }));
-      if (recs.length) out.push({ ...base, level: 'GLOBAL', actionType: PAM.actionType[step.action], allocs: recs });
+      if (recs.length) out.push({ ...base, level: 'GLOBAL', actionType: IAS.actionType[step.action], allocs: recs });
       holdings.filter(h => h.plan).forEach(h => {
         const steps = h.plan.steps;
         let j = cursors.get(h);
         while (j < steps.length && steps[j].action !== step.action) j++;
         if (j >= steps.length) return;
         cursors.set(h, j + 1);
-        portfolioStepMessages(steps[j], { ...base, allvuePortfolio: h.allvuePortfolio }, h.weights, accounts).forEach(m => out.push(m));
+        portfolioStepMessages(steps[j], { ...base, loanPortfolio: h.loanPortfolio }, h.weights, accounts).forEach(m => out.push(m));
       });
     });
     holdings.filter(h => h.plan && cursors.get(h) < h.plan.steps.filter(st => st.lines.some(l => l.amount)).length).forEach(h => {
-      onProblem(`${h.portfolioName || h.allvuePortfolio}'s PAM steps don't line up with the facility's, so its messages can't be generated.`);
+      onProblem(`${h.portfolioName || h.loanPortfolio}'s IAS steps don't line up with the facility's, so its messages can't be generated.`);
     });
     return out;
   }
 
-  /** One step's portfolio transactions for one AllVue portfolio's PAM portfolios. */
+  /** One step's portfolio transactions for one Loan System portfolio's IAS portfolios. */
   function portfolioStepMessages(step, base, weights, accounts) {
     const out = [];
     if (step.action === 'CONTRACT_SPLIT' || step.action === 'CONTRACT_COMBINE') {
@@ -1068,41 +1139,41 @@
         weights.forEach(w => {
           const allocs = group.map(l => ({ contractId: isSplit ? l.toId : l.fromId, units: l.allocation[w.key] })).filter(a => a.units !== 0);
           const units = allocs.reduce((t, a) => t + a.units, 0);
-          if (units) out.push({ ...base, level: 'PORTFOLIO', pamPortfolio: w.key, account: accounts[w.key] || {}, contractId, unitsExchanged: units, allocs });
+          if (units) out.push({ ...base, level: 'PORTFOLIO', iasPortfolio: w.key, account: accounts[w.key] || {}, contractId, unitsExchanged: units, allocs });
         });
       }
     } else if (step.action === 'PAYDOWN') {
       // TaContractRedemption redeems one contract per message.
       step.lines.forEach(l => weights.forEach(w => {
         const units = l.allocation[w.key];
-        if (units) out.push({ ...base, level: 'PORTFOLIO', pamPortfolio: w.key, account: accounts[w.key] || {}, contractId: l.fromId, unitsExchanged: units, allocs: [] });
+        if (units) out.push({ ...base, level: 'PORTFOLIO', iasPortfolio: w.key, account: accounts[w.key] || {}, contractId: l.fromId, unitsExchanged: units, allocs: [] });
       }));
     } else if (step.action === 'DRAW') {
       // TaDrawDown: one message per portfolio, allocated to the contracts drawn into.
       weights.forEach(w => {
         const allocs = step.lines.map(l => ({ contractId: l.toId, units: l.allocation[w.key] })).filter(a => a.units !== 0);
         const units = allocs.reduce((t, a) => t + a.units, 0);
-        if (units) out.push({ ...base, level: 'PORTFOLIO', pamPortfolio: w.key, account: accounts[w.key] || {}, contractId: '', unitsExchanged: units, allocs });
+        if (units) out.push({ ...base, level: 'PORTFOLIO', iasPortfolio: w.key, account: accounts[w.key] || {}, contractId: '', unitsExchanged: units, allocs });
       });
     } else {
-      // Capitalized interest: no PAM message format yet, so it stays a manual step.
+      // Capitalized interest: no IAS message format yet, so it stays a manual step.
       step.lines.forEach(l => weights.forEach(w => {
         const units = l.allocation[w.key];
-        if (units) out.push({ ...base, level: 'PORTFOLIO', manual: true, pamPortfolio: w.key, contractId: l.fromId || l.toId, unitsExchanged: units, allocs: [] });
+        if (units) out.push({ ...base, level: 'PORTFOLIO', manual: true, iasPortfolio: w.key, contractId: l.fromId || l.toId, unitsExchanged: units, allocs: [] });
       }));
     }
     return out;
   }
 
-  const pamDate = d => String(d || '').replace(/-/g, '');
+  const iasDate = d => String(d || '').replace(/-/g, '');
 
-  // ---------------------------------------------------------------- PAM contract add (SMFBANKLOANTRANCHE)
+  // ---------------------------------------------------------------- IAS contract add (SMFBANKLOANTRANCHE)
   //
   // Minimal message that adds new funded contracts to an existing tranche, per
-  // the PAM bank loan contract add build spec. Built as a tree of messages and
+  // the IAS bank loan contract add build spec. Built as a tree of messages and
   // serialized recursively, never by string templating.
 
-  /** A PAM message node: KEYWORD(arg, arg, ...). Args are strings, numbers, null (blank) or nodes. */
+  /** An IAS message node: KEYWORD(arg, arg, ...). Args are strings, numbers, null (blank) or nodes. */
   const node = (keyword, ...args) => ({ keyword, args });
 
   function serialize(n) {
@@ -1125,12 +1196,12 @@
       if (ch === '(') depth++;
       if (ch === ')' && --depth < 0) break;
     }
-    if (depth !== 0) throw new Error('Unbalanced parentheses in PAM message');
+    if (depth !== 0) throw new Error('Unbalanced parentheses in IAS message');
     return text;
   }
 
-  // Values PAM needs that AllVue doesn't carry. From the build spec's sample defaults.
-  const PAM_CONTRACT_DEFAULTS = {
+  // Values IAS needs that Loan System doesn't carry. From the build spec's sample defaults.
+  const IAS_CONTRACT_DEFAULTS = {
     strip: ' ', payment_type: 'B', coupon_form: 'C', day_count: 'D', dated_type: 'T', delay: 0,
     holiday_schedule: 'US', pay_date_conv: 3, float_method: 'A', multiplier: 1, max_rate: 0,
     lockout_days: 0, lookback_days: 2, reset_date_conv: 3, reset_holiday_schedule: 'US',
@@ -1154,7 +1225,7 @@
     return null;
   }
 
-  /** Maps an AllVue contract on a mapped tranche to the build spec's input keys. */
+  /** Maps a Loan System contract on a mapped tranche to the build spec's input keys. */
   function contractAddInput(c, tranche) {
     const coupon_type = c.rateType.toUpperCase() === 'FIXED' ? 'F' : c.rateType.toUpperCase() === 'FLOATING' ? 'V' : c.rateType;
     const coupon_freq = FREQ_CODE[c.payFreq.toUpperCase()] || c.payFreq;
@@ -1166,16 +1237,16 @@
     const noDay = coupon_freq === 'B' || coupon_freq === 'T';
     const prefix = BASE_INDEX_PREFIX[c.baseRate.toUpperCase()];
     return {
-      ...PAM_CONTRACT_DEFAULTS,
-      tranche_id: tranche.pamTrancheId,
+      ...IAS_CONTRACT_DEFAULTS,
+      tranche_id: tranche.iasTrancheId,
       loan_type: LOAN_TYPE_CODE[c.facilityType] ?? '',
-      tranche_maturity: pamDate(tranche.maturityDate),
+      tranche_maturity: iasDate(tranche.maturityDate),
       currency: tranche.currency,
-      contract_id: c.pamContractId,
-      contract_maturity: pamDate(tranche.maturityDate),
+      contract_id: c.iasContractId,
+      contract_maturity: iasDate(tranche.maturityDate),
       coupon_type,
       coupon_rate: coupon_type === 'F' ? c.marginBps / 100 : '',
-      coupon_form: COUPON_FORM_CODE[c.interestType.toUpperCase()] || PAM_CONTRACT_DEFAULTS.coupon_form,
+      coupon_form: COUPON_FORM_CODE[c.interestType.toUpperCase()] || IAS_CONTRACT_DEFAULTS.coupon_form,
       coupon_freq,
       day_count: DAY_COUNT_CODE[c.dayCount.toUpperCase()] || c.dayCount,
       accrual_month: accrualMonthCode(coupon_freq, payMonth) ?? '',
@@ -1186,7 +1257,7 @@
       reset_day: coupon_type === 'V' && !noDay ? payDay : '',
       spread_bps: coupon_type === 'V' ? c.marginBps : '',
       min_rate: coupon_type === 'V' ? c.floorPct : '',
-      max_rate: coupon_type === 'V' ? (c.capPct || PAM_CONTRACT_DEFAULTS.max_rate) : PAM_CONTRACT_DEFAULTS.max_rate,
+      max_rate: coupon_type === 'V' ? (c.capPct || IAS_CONTRACT_DEFAULTS.max_rate) : IAS_CONTRACT_DEFAULTS.max_rate,
       pay_freq_name: c.payFreq,
       day_count_name: c.dayCount,
       interest_type: c.interestType,
@@ -1206,9 +1277,9 @@
     ['tranche_id', 'contract_id', 'tranche_maturity', 'contract_maturity', 'currency', 'coupon_type', 'coupon_freq', 'dated_type']
       .forEach(k => { if (blank(i[k]) && !(k === 'dated_type' && i[k] === ' ')) errors.push(`${k} is required.`); });
     ['tranche_maturity', 'contract_maturity'].forEach(k => { if (!blank(i[k]) && !isDate(i[k])) errors.push(`${k} "${i[k]}" is not a valid YYYYMMDD date.`); });
-    if (!blank(i.coupon_freq) && !['M', 'Q', 'S', 'A', 'B'].includes(i.coupon_freq)) errors.push(`No PAM coupon frequency code for pay frequency "${i.pay_freq_name || i.coupon_freq}".`);
-    if (!blank(i.day_count) && !['D', 'C', 'A'].includes(i.day_count)) errors.push(`No PAM day count code for "${i.day_count_name || i.day_count}".`);
-    if (i.coupon_type === 'V' && !blank(i.reset_freq) && !['M', 'Q', 'S', 'A'].includes(i.reset_freq)) errors.push(`No PAM reset frequency code for "${i.reset_freq}".`);
+    if (!blank(i.coupon_freq) && !['M', 'Q', 'S', 'A', 'B'].includes(i.coupon_freq)) errors.push(`No IAS coupon frequency code for pay frequency "${i.pay_freq_name || i.coupon_freq}".`);
+    if (!blank(i.day_count) && !['D', 'C', 'A'].includes(i.day_count)) errors.push(`No IAS day count code for "${i.day_count_name || i.day_count}".`);
+    if (i.coupon_type === 'V' && !blank(i.reset_freq) && !['M', 'Q', 'S', 'A'].includes(i.reset_freq)) errors.push(`No IAS reset frequency code for "${i.reset_freq}".`);
     if (isDate(i.tranche_maturity) && isDate(i.contract_maturity) && Number(i.contract_maturity) > Number(i.tranche_maturity)) errors.push('contract_maturity is after tranche_maturity.');
     if (![1, 2, 3].includes(Number(i.loan_type)) || blank(i.loan_type)) errors.push(`loan_type "${i.loan_type}" must be 1, 2 or 3.`);
     if (String(i.payment_type) === '66' || String(i.payment_type) === '83') {
@@ -1218,7 +1289,7 @@
     if (i.coupon_type === 'V') {
       if (!blank(i.coupon_rate)) errors.push('coupon_rate must be blank for a floating contract.');
       ['base_index', 'float_method', 'reset_freq', 'spread_bps', 'multiplier', 'max_rate', 'min_rate', 'lockout_days', 'lookback_days', 'reset_date_conv', 'reset_holiday_schedule']
-        .forEach(k => { if (blank(i[k])) errors.push(k === 'base_index' && !blank(i.base_rate) ? `No PAM base index for base rate "${i.base_rate}".` : `${k} is required for a floating contract.`); });
+        .forEach(k => { if (blank(i[k])) errors.push(k === 'base_index' && !blank(i.base_rate) ? `No IAS base index for base rate "${i.base_rate}".` : `${k} is required for a floating contract.`); });
     } else if (i.coupon_type === 'F') {
       if (blank(i.coupon_rate) || Number(i.coupon_rate) < 0) errors.push('coupon_rate is required and must be 0 or more for a fixed contract.');
     } else if (!blank(i.coupon_type)) errors.push(`coupon_type "${i.coupon_type}" must be V or F.`);
@@ -1254,7 +1325,7 @@
         node('LOCKOUTINFORMATION', i.lockout_days, i.lookback_days),
         node('RESETDATECONV', i.reset_date_conv),
         node('RESETHOLIDAYSCHEDULE', i.reset_holiday_schedule))] : []));
-    return node('SMFBANKLOANCONTRACTREC', 'REPLACE', node('SecID', PAM.contractIdType, i.contract_id),
+    return node('SMFBANKLOANCONTRACTREC', 'REPLACE', node('SecID', IAS.contractIdType, i.contract_id),
       i.strip, i.payment_type, i.contract_maturity, null, coupon,
       ...(blank(i.issue_name) ? [] : [node('ISSUENAME', i.issue_name)]));
   }
@@ -1265,7 +1336,7 @@
    */
   function contractAddNode(inputs, { ccid } = {}) {
     const t = inputs[0];
-    return node('SMFBANKLOANTRANCHE', 'UPDATE', node('SecID', PAM.facilityIdType, t.tranche_id), null,
+    return node('SMFBANKLOANTRANCHE', 'UPDATE', node('SecID', IAS.facilityIdType, t.tranche_id), null,
       t.loan_type, t.tranche_maturity, t.currency,
       node('SMFBANKLOANCONTRACT', 'REPLACE', ...inputs.map(contractRecNode)),
       ...(ccid ? [node('CCID', ccid.user, ccid.date, ccid.time ?? 0)] : []));
@@ -1275,51 +1346,51 @@
     return assertBalanced(serialize(contractAddNode(inputs, opts)));
   }
 
-  const pamUnits = cents => `${fromCents(cents)}0000`;
+  const iasUnits = cents => `${fromCents(cents)}0000`;
 
-  /** Builds one PAM message as a tree (see node()) so every message serializes the same way. */
-  function pamMessageNode(m, { ccid = '' } = {}) {
+  /** Builds one IAS message as a tree (see node()) so every message serializes the same way. */
+  function iasMessageNode(m, { ccid = '' } = {}) {
     if (m.level === 'SMF') return contractAddNode(m.inputs);
-    const fac = node('SecID', PAM.facilityIdType, m.facilityId);
-    const date = pamDate(m.effectiveDate);
+    const fac = node('SecID', IAS.facilityIdType, m.facilityId);
+    const date = iasDate(m.effectiveDate);
     if (m.level === 'GLOBAL') {
       return node('BANKLOANACTION', 'Add', null, fac, date, m.actionType, null,
         node('BANKLOANACTIONCONTRACTALLOC', ...m.allocs.map(a =>
-          node('BANKLOANACTIONCONTRACTALLOCREC', node('ContractSecID', PAM.contractIdType, a.contractId), pamUnits(a.units)))));
+          node('BANKLOANACTIONCONTRACTALLOCREC', node('ContractSecID', IAS.contractIdType, a.contractId), iasUnits(a.units)))));
     }
     const bnk = node('BNK', m.account.bank, m.account.bankName, m.account.custodyAccount, node('CASHBANK', m.account.cashBank));
     const alloc = node('CONTRACTALLOC', 'ADD', ...m.allocs.map(a =>
-      node('CONTRACTALLOCREC', node('SecID', a.idType || PAM.contractIdType, a.contractId), pamUnits(a.units))));
-    const units = pamUnits(m.unitsExchanged);
+      node('CONTRACTALLOCREC', node('SecID', a.idType || IAS.contractIdType, a.contractId), iasUnits(a.units))));
+    const units = iasUnits(m.unitsExchanged);
     if (m.type === 'PAYDOWN') {
       // Per the TACONTRACTREDEMPTION minimum message spec: Portfolio comes before BNK(); accrued interest 0.
-      return node('TaContractRedemption', 'ADD', null, fac, node('CONTRACTSECID', PAM.contractIdType, m.contractId),
-        date, m.pamPortfolio, bnk, units, units, '0.000000');
+      return node('TaContractRedemption', 'ADD', null, fac, node('CONTRACTSECID', IAS.contractIdType, m.contractId),
+        date, m.iasPortfolio, bnk, units, units, '0.000000');
     }
     if (m.type === 'DRAW') {
       // Per the TADRAWDOWN minimum message spec: trade and settle date both the effective date,
       // blank broker, BNK() before Portfolio, the unfunded taken down equals the draw.
-      return node('TaDrawDown', 'ADD', null, fac, date, date, null, bnk, m.pamPortfolio, units, units,
-        node('BLUNFUNDED', node('UNFUNDEDUNITS', units), node('BLUNFUNDEDTKDN', PAM.unfundedTakedown)),
+      return node('TaDrawDown', 'ADD', null, fac, date, date, null, bnk, m.iasPortfolio, units, units,
+        node('BLUNFUNDED', node('UNFUNDEDUNITS', units), node('BLUNFUNDEDTKDN', IAS.unfundedTakedown)),
         alloc, node('DELAYEDDELIVERYDATE', date));
     }
     const ccidNode = node('CCID', ccid, date, 0);
-    // The transaction number (third argument) is blank: PAM assigns it on ADD.
+    // The transaction number (third argument) is blank: IAS assigns it on ADD.
     if (m.type === 'CONTRACT_COMBINE') {
-      return node('TaCONTRACTCOMBINE', 'ADD', null, fac, node('CONTRACTSECID', PAM.contractIdType, m.contractId),
-        date, date, m.pamPortfolio, bnk, pamUnits(m.unitsExchanged), alloc, ccidNode);
+      return node('TaCONTRACTCOMBINE', 'ADD', null, fac, node('CONTRACTSECID', IAS.contractIdType, m.contractId),
+        date, date, m.iasPortfolio, bnk, iasUnits(m.unitsExchanged), alloc, ccidNode);
     }
     const zero = '0.000000000000000';
-    return node('TaCONTRACTSPLIT', 'ADD', null, fac, node('CONTRACTSECID', PAM.contractIdType, m.contractId),
-      date, date, m.pamPortfolio, bnk, pamUnits(m.unitsExchanged), '0.000000', null, alloc,
-      node('SETMTHD', PAM.settlementMethod),
-      node('TRDR', 'M', pamDate(m.maturityDate), PAM.tradePrice, zero, null, zero, zero, zero, zero, zero, zero, null, null),
+    return node('TaCONTRACTSPLIT', 'ADD', null, fac, node('CONTRACTSECID', IAS.contractIdType, m.contractId),
+      date, date, m.iasPortfolio, bnk, iasUnits(m.unitsExchanged), '0.000000', null, alloc,
+      node('SETMTHD', IAS.settlementMethod),
+      node('TRDR', 'M', iasDate(m.maturityDate), IAS.tradePrice, zero, null, zero, zero, zero, zero, zero, zero, null, null),
       ccidNode);
   }
 
-  /** One PAM message on a single line, or indented for review with pretty. */
-  function pamMessageText(m, { ccid = '', pretty = false } = {}) {
-    const n = pamMessageNode(m, { ccid });
+  /** One IAS message on a single line, or indented for review with pretty. */
+  function iasMessageText(m, { ccid = '', pretty = false } = {}) {
+    const n = iasMessageNode(m, { ccid });
     return pretty ? prettyPrint(n) : assertBalanced(serialize(n));
   }
 
@@ -1330,21 +1401,21 @@
       return `Create contract ${m.contractId} on ${m.facilityId}: ${c.rateType} ${c.baseRate} ${c.tenor} + ${c.marginBps} bps, floor ${c.floorPct}, ${c.interestType}, ${c.payFreq} pay, ${c.resetFreq} reset, ${c.dayCount}, ${c.startDate} to ${c.endDate}.`;
     }
     const verb = { CAPITALIZE: 'Capitalized interest of' }[m.type] || m.type;
-    return `${verb} ${formatMoney(m.unitsExchanged)} on contract ${m.contractId} for ${m.pamPortfolio} (${m.facilityId}), effective ${m.effectiveDate}.`;
+    return `${verb} ${formatMoney(m.unitsExchanged)} on contract ${m.contractId} for ${m.iasPortfolio} (${m.facilityId}), effective ${m.effectiveDate}.`;
   }
 
   /**
-   * Builds one PAM import file from approved events. The transaction number is
-   * left blank because PAM assigns it on ADD; each portfolio message gets a
+   * Builds one IAS import file from approved events. The transaction number is
+   * left blank because IAS assigns it on ADD; each portfolio message gets a
    * CCID of batch-sequence.
    */
-  function buildPamFile(events, { batchId, today = '' }) {
+  function buildIasFile(events, { batchId, today = '' }) {
     const seen = new Map();
     const errors = [];
     const warnings = [];
     if (today) {
       events.forEach(ev => ev.messages.filter(m => m.level === 'PORTFOLIO' && (m.type === 'PAYDOWN' || m.type === 'DRAW') && m.effectiveDate > today)
-        .slice(0, 1).forEach(m => warnings.push(`${displayName(ev)}: ${m.type === 'PAYDOWN' ? 'redemption' : 'drawdown'} dated ${m.effectiveDate} is after today (${today}); PAM rejects future-dated ${m.type === 'PAYDOWN' ? 'redemptions' : 'drawdowns'}.`)));
+        .slice(0, 1).forEach(m => warnings.push(`${displayName(ev)}: ${m.type === 'PAYDOWN' ? 'redemption' : 'drawdown'} dated ${m.effectiveDate} is after today (${today}); IAS rejects future-dated ${m.type === 'PAYDOWN' ? 'redemptions' : 'drawdowns'}.`)));
     }
     events.forEach(ev => ev.messages.filter(m => m.level === 'SMF').forEach(m => m.contractIds.forEach(id => {
       if (seen.has(id)) errors.push(`Contract ${id} is created by both ${seen.get(id)} and ${ev.key}.`);
@@ -1359,7 +1430,7 @@
       if (m.manual) { (m.level === 'SMF' ? before : after).push({ eventKey: ev.key, text: manualStepText(m) }); return; }
       seq++;
       const opts = m.level === 'PORTFOLIO' ? { ccid: `${batchId}-${String(seq).padStart(4, '0')}` } : {};
-      blocks.push(pamMessageText(m, opts));
+      blocks.push(iasMessageText(m, opts));
     }));
     // One message per line, newline-terminated.
     return { text: blocks.map(b => `${b}\n`).join(''), messageCount: blocks.length, before, after, errors, warnings };
@@ -1370,7 +1441,7 @@
   function normalizeFees(rows) {
     return rows.map((r, i) => ({
       rowNo: i + 2, // header is line 1
-      allvuePortfolio: String(r.AllVuePortfolio || '').trim(),
+      loanPortfolio: String(r.LoanPortfolio || '').trim(),
       assetId: String(r.AssetID || '').trim(),
       assetName: String(r.AssetName || r.AssetID || '').trim(),
       facilityType: String(r.FacilityType || '').trim().toUpperCase(),
@@ -1381,7 +1452,7 @@
       avgUnfunded: toCents(r.AverageUnfunded),
       dayCount: String(r.DayCount || '').trim().toUpperCase(),
       amount: toCents(r.Amount),
-      transactionId: String(r.AllVueTransactionID || '').trim(),
+      transactionId: String(r.LoanTransactionID || '').trim(),
     }));
   }
 
@@ -1394,13 +1465,13 @@
   }
 
   /**
-   * Checks each row of an AllVue unfunded fee export and splits it across the PAM
+   * Checks each row of a Loan System unfunded fee export and splits it across the IAS
    * portfolios on their current unfunded position in the tranche.
    */
   function checkFees(input) {
     const trancheMap = input.trancheMap || {};
     const portfolioMap = input.portfolioMap || {};
-    const pamPositions = input.pamPositions || [];
+    const iasPositions = input.iasPositions || [];
     const firstRowByKey = new Map();
     const money = formatMoney;
 
@@ -1409,7 +1480,7 @@
       const exception = text => flags.push({ level: 'exception', text });
       const review = text => flags.push({ level: 'review', text });
 
-      let key = ['FEE', f.allvuePortfolio, f.assetId, f.feeType.toUpperCase(), f.periodStart, f.periodEnd].join('|');
+      let key = ['FEE', f.loanPortfolio, f.assetId, f.feeType.toUpperCase(), f.periodStart, f.periodEnd].join('|');
       if (firstRowByKey.has(key)) {
         exception(`Same facility, fee type and period as row ${firstRowByKey.get(key)} of the export. Load only one of them.`);
         key += `|row${f.rowNo}`;
@@ -1418,57 +1489,57 @@
       const { days, expected } = expectedFee(f);
       const diff = f.amount - expected;
       const tranche = trancheMap[f.assetId];
-      const pamPortfolios = portfolioMap[f.allvuePortfolio] || [];
+      const iasPortfolios = portfolioMap[f.loanPortfolio] || [];
 
-      if (!tranche) exception(`Asset ${f.assetId} is not mapped to a PAM tranche. Set the tranche up in PAM and add it to the tranche map.`);
-      if (!pamPortfolios.length) exception(`AllVue portfolio ${f.allvuePortfolio} has no PAM portfolios in the portfolio map.`);
+      if (!tranche) exception(`Asset ${f.assetId} is not mapped to an IAS tranche. Set the tranche up in IAS and add it to the tranche map.`);
+      if (!iasPortfolios.length) exception(`Loan System portfolio ${f.loanPortfolio} has no IAS portfolios in the portfolio map.`);
       if (f.facilityType === 'TL') exception('Unfunded fee on a term loan. Term loans have no unfunded commitment, so check the asset or the fee type.');
       if (days <= 0) exception(`Period end ${f.periodEnd} is before period start ${f.periodStart}.`);
 
       if (f.amount < 0) {
         review(`Negative amount of ${money(f.amount)}. Confirm this reverses or corrects an earlier fee before loading it.`);
       } else if (f.amount === 0) {
-        review('Zero amount. There is nothing to load; reject it unless PAM needs a zero entry.');
+        review('Zero amount. There is nothing to load; reject it unless IAS needs a zero entry.');
       } else if (Math.abs(diff) > Math.max(FEE_TOLERANCE.cents, Math.abs(expected) * FEE_TOLERANCE.share)) {
         review(`Amount differs from rate × average unfunded × days by ${money(diff)} (expected ${money(expected)}). Check the rate, the average unfunded or the period against the agent notice.`);
       }
 
       let allocationBasis = [];
-      let pamUnfunded = 0;
-      if (tranche && pamPortfolios.length) {
-        allocationBasis = pamPortfolios.map(pp => {
-          const pos = pamPositions.find(p => p.pamPortfolio === pp && p.pamTrancheId === tranche.pamTrancheId);
-          return { pamPortfolio: pp, weight: pos ? pos.unfunded : 0 };
+      let iasUnfunded = 0;
+      if (tranche && iasPortfolios.length) {
+        allocationBasis = iasPortfolios.map(pp => {
+          const pos = iasPositions.find(p => p.iasPortfolio === pp && p.iasTrancheId === tranche.iasTrancheId);
+          return { iasPortfolio: pp, weight: pos ? pos.unfunded : 0 };
         });
-        pamUnfunded = allocationBasis.reduce((s, b) => s + b.weight, 0);
-        if (pamUnfunded <= 0) {
-          exception(`No unfunded position in PAM for tranche ${tranche.pamTrancheId} in ${pamPortfolios.join(', ')}, so there is nothing to split the fee on.`);
-        } else if (f.avgUnfunded > 0 && Math.abs(pamUnfunded - f.avgUnfunded) / f.avgUnfunded > FEE_POSITION_DRIFT) {
-          const pct = Math.round(Math.abs(pamUnfunded - f.avgUnfunded) / f.avgUnfunded * 100);
-          review(`PAM unfunded today (${money(pamUnfunded)}) differs from AllVue's average unfunded for the period (${money(f.avgUnfunded)}) by ${pct}%. Unfunded changed during the period, so check the split by fund.`);
+        iasUnfunded = allocationBasis.reduce((s, b) => s + b.weight, 0);
+        if (iasUnfunded <= 0) {
+          exception(`No unfunded position in IAS for tranche ${tranche.iasTrancheId} in ${iasPortfolios.join(', ')}, so there is nothing to split the fee on.`);
+        } else if (f.avgUnfunded > 0 && Math.abs(iasUnfunded - f.avgUnfunded) / f.avgUnfunded > FEE_POSITION_DRIFT) {
+          const pct = Math.round(Math.abs(iasUnfunded - f.avgUnfunded) / f.avgUnfunded * 100);
+          review(`IAS unfunded today (${money(iasUnfunded)}) differs from the Loan System's average unfunded for the period (${money(f.avgUnfunded)}) by ${pct}%. Unfunded changed during the period, so check the split by fund.`);
         }
       }
 
-      const weights = allocationBasis.filter(b => b.weight > 0).map(b => ({ key: b.pamPortfolio, weight: b.weight }));
+      const weights = allocationBasis.filter(b => b.weight > 0).map(b => ({ key: b.iasPortfolio, weight: b.weight }));
       const allocation = tranche && weights.length ? allocate(f.amount, weights) : null;
       const line = { messageType: 'UNFUNDED_FEE', note: f.feeType, amount: f.amount, allocation };
       const messages = allocation ? weights.map(w => ({
         FeeKey: key,
         TransactionType: 'UNFUNDED_FEE',
         FeeType: f.feeType,
-        PAMPortfolio: w.key,
-        PAMTrancheID: tranche.pamTrancheId,
+        IASPortfolio: w.key,
+        IASTrancheID: tranche.iasTrancheId,
         PeriodStart: f.periodStart,
         PeriodEnd: f.periodEnd,
         Amount: fromCents(allocation[w.key]),
-        AllVueTransactionID: f.transactionId,
+        LoanTransactionID: f.transactionId,
       })) : [];
 
       const route = flags.some(x => x.level === 'exception') ? 'exception' : flags.length ? 'review' : 'clean';
       return {
         kind: 'fee', key, ...f, days, expected, diff, flags, route,
-        pamTrancheId: tranche ? tranche.pamTrancheId : '',
-        pamUnfunded, allocationBasis, lines: [line], messages,
+        iasTrancheId: tranche ? tranche.iasTrancheId : '',
+        iasUnfunded, allocationBasis, lines: [line], messages,
       };
     });
 
@@ -1476,7 +1547,7 @@
     return items.sort((a, b) => order[a.route] - order[b.route] || a.assetName.localeCompare(b.assetName) || a.rowNo - b.rowNo);
   }
 
-  /** Numbers each event's (or fee's) messages into one PAM import file. */
+  /** Numbers each event's (or fee's) messages into one IAS import file. */
   function buildBatchRows(events, batchId) {
     let seq = 0;
     return events.flatMap(ev => ev.messages.map(m => ({ BatchID: batchId, Seq: ++seq, ...m })));
@@ -1486,12 +1557,12 @@
     TERM_FIELDS, TERM_LABELS, TENOR_DAYS, TYPE_LABELS, LAYOUTS,
     parseCSV, toCSV, missingColumns,
     toCents, fromCents, formatMoney, normalizeDate, daysBetween,
-    normalizeAllVue, normalizeTrancheMap, normalizePortfolioMap, normalizePamPositions, normalizeLineage,
-    allocate, detectEvents, buildBatchRows, checkRunDates, firstScheduledPayDate, displayName,
+    normalizeLoanSystem, normalizeTrancheMap, normalizePortfolioMap, normalizeIasPositions, normalizeLineage,
+    AUTO_PAYDOWN_SHARE_TOLERANCE, allocate, detectEvents, buildBatchRows, checkRunDates, firstScheduledPayDate, displayName,
     FEE_TOLERANCE, FEE_POSITION_DRIFT, normalizeFees, expectedFee, checkFees,
-    REPORT_REQUIRED, REPORT_OPTIONAL, isAllVueReport, missingReportColumns, parseBaseRateIndex, fromAllVueReport,
-    PAM, normalizePortfolioAccounts, pamMessageNode, pamMessageText, manualStepText, buildPamFile,
-    node, serialize, prettyPrint, assertBalanced, PAM_CONTRACT_DEFAULTS, EXCLUDED_CONTRACT_FIELDS,
+    REPORT_REQUIRED, REPORT_OPTIONAL, isLoanReport, missingReportColumns, parseBaseRateIndex, fromLoanReport,
+    IAS, normalizePortfolioAccounts, iasMessageNode, iasMessageText, manualStepText, buildIasFile,
+    node, serialize, prettyPrint, assertBalanced, IAS_CONTRACT_DEFAULTS, EXCLUDED_CONTRACT_FIELDS,
     contractAddInput, validateContractAdd, contractAddNode, contractAddMessage,
   };
 });

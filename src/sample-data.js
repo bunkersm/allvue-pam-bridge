@@ -3,7 +3,7 @@
  * fictional. Produces the same row layouts as the CSV uploads, so the sample
  * runs through exactly the same path as real files.
  *
- * Scenario: AllVue snapshot on 2026-10-29 vs 2026-10-30 (a month-end roll date).
+ * Scenario: Loan System snapshot on 2026-10-29 vs 2026-10-30 (a month-end roll date).
  */
 (function (root) {
   'use strict';
@@ -18,11 +18,11 @@
   };
   const FREQ = { '1M': 'Monthly', '3M': 'Quarterly' };
 
-  const PAM_PORTFOLIOS = {
+  const IAS_PORTFOLIOS = {
     'LOANS-MASTER': ['FUND-I', 'FUND-II', 'SMA-ALPHA'],
     'CLO-MASTER': ['CLO-2023-1', 'CLO-2024-1'],
   };
-  // Each tranche's split across PAM portfolios differs, as it would after trading.
+  // Each tranche's split across IAS portfolios differs, as it would after trading.
   const SHARE_PATTERNS = {
     'LOANS-MASTER': [[500, 300, 200], [450, 350, 200], [400, 400, 200], [550, 250, 200], [475, 325, 200]],
     'CLO-MASTER': [[600, 400], [500, 500], [650, 350]],
@@ -42,7 +42,7 @@
     { id: 'A1001', name: 'Alder Ridge Foods TLB', port: 'LOANS-MASTER', fac: 'TL', margin: 325, floor: 0.5, ...roll('1M', 14962500) },
     { id: 'A1002', name: 'Bluestem Logistics TLB', port: 'LOANS-MASTER', fac: 'TL', margin: 400, floor: 0.75, ...roll('3M', 22343750) },
     { id: 'A1003', name: 'Copperline Software TL', port: 'LOANS-MASTER', fac: 'TL', margin: 350, floor: 0.5, share: 0.024,
-      // Held in both AllVue portfolios; paid down 10% at the roll. One event, one global action.
+      // Held in both Loan System portfolios; paid down 10% at the roll. One event, one global action.
       prior: [prior('1M', 12000000, { id: '418901' })], current: [next('1M', 10800000, { id: '418951' })] },
     { id: 'A1004', name: 'Driftwood Health TLB', port: 'LOANS-MASTER', fac: 'TL', margin: 475, floor: 0.5, ...roll('3M', 9875000) },
     { id: 'A1005', name: 'Elmhurst Packaging TLB', port: 'LOANS-MASTER', fac: 'TL', margin: 375, floor: 0.5,
@@ -68,7 +68,7 @@
       prior: [prior('1M', 7500000)], current: [k('1M', 7500000, ['2026-10-30', '2026-11-16'])] },
     { id: 'A1013', name: 'Maple Grove Dental TL', port: 'LOANS-MASTER', fac: 'TL', margin: 425, floor: 0.75, ...roll('1M', 6234375) },
     { id: 'A1014', name: 'Northfield Insurance Services TLB', port: 'LOANS-MASTER', fac: 'TL', margin: 300, floor: 0.5, ...roll('1M', 25000000) },
-    { id: 'A1015', name: 'Oakmoss Retail TL', port: 'LOANS-MASTER', fac: 'TL', margin: 475, floor: 0.5, pamBreak: 250000, ...roll('3M', 8800000) },
+    { id: 'A1015', name: 'Oakmoss Retail TL', port: 'LOANS-MASTER', fac: 'TL', margin: 475, floor: 0.5, iasBreak: 250000, ...roll('3M', 8800000) },
     { id: 'A1016', name: 'Pinecrest Education TLB', port: 'LOANS-MASTER', fac: 'TL', margin: 375, floor: 0.5, ...roll('3M', 13333333.33) },
     { id: 'A1017', name: 'Zephyr Holdings TLB', port: 'LOANS-MASTER', fac: 'TL', margin: 350, floor: 0.5,
       prior: [k('1M', 10000000, ['2026-10-15', '2026-11-16'], { id: '418703' })],
@@ -142,12 +142,12 @@
     { asset: 'A1003', type: 'Commitment fee', bps: 50, avg: 0, amount: 500, port: 'LOANS-MASTER' }, // fee booked against a term loan
     { asset: 'A1029', type: 'Commitment fee', bps: 37.5, avg: 2500000 },
     { asset: 'A1030', type: 'Ticking fee', bps: 75, avg: 6000000 },
-    { asset: 'A1032', type: 'Commitment fee', bps: 50, avg: 5000000 },      // facility not set up in PAM
+    { asset: 'A1032', type: 'Commitment fee', bps: 50, avg: 5000000 },      // facility not set up in IAS
   ];
 
   const money = n => n.toFixed(2);
 
-  // Display names: AllVue portfolioName, legalEntityName (issuer) and instrumentName.
+  // Display names: Loan System portfolioName, legalEntityName (issuer) and instrumentName.
   const PORTFOLIO_NAMES = { 'LOANS-MASTER': 'Loans Master Fund', 'CLO-MASTER': 'CLO Master Portfolio' };
   const INSTRUMENT = { TLB: 'Term Loan B', TL: 'Term Loan', RCF: 'Revolving Credit Facility', DDTL: 'Delayed Draw Term Loan', 'PIK TL': 'PIK Term Loan' };
   function names(a) {
@@ -155,7 +155,7 @@
     return { issuer: m ? m[1] : a.name, instrument: m ? INSTRUMENT[m[2]] : a.name };
   }
 
-  function allvueRows(side) {
+  function loanRows(side) {
     const asOf = side === 'prior' ? PRIOR_AS_OF : AS_OF;
     const rows = [];
     ASSETS.forEach(a => {
@@ -168,7 +168,7 @@
       const global = amount => Math.round(amount * 100 / share) / 100;
       const n = names(a);
       const base = {
-        AsOfDate: asOf, AllVuePortfolio: a.port, PortfolioName: PORTFOLIO_NAMES[a.port], AssetID: a.id,
+        AsOfDate: asOf, LoanPortfolio: a.port, PortfolioName: PORTFOLIO_NAMES[a.port], AssetID: a.id,
         AssetName: n.instrument, IssuerName: n.issuer, FacilityType: a.fac, Commitment: money(commitment),
       };
       contracts.forEach(c => rows.push({
@@ -192,35 +192,35 @@
     const seen = new Set();
     return ASSETS.filter(a => !a.unmapped && !seen.has(a.id) && seen.add(a.id))
       .map((a, i) => ({
-        AssetID: a.id, PAMTrancheID: `PT-${a.id.slice(1)}`, FacilityType: a.fac,
+        AssetID: a.id, IASTrancheID: `PT-${a.id.slice(1)}`, FacilityType: a.fac,
         // Fictional maturities spread over 2029-2032.
         MaturityDate: `${2029 + (i % 4)}-${String((i * 5) % 12 + 1).padStart(2, '0')}-15`,
-        PAMCurrency: '1',
+        IASCurrency: '1',
       }));
   }
 
   function portfolioMapRows() {
     let acct = 12345670;
-    return Object.entries(PAM_PORTFOLIOS).flatMap(([av, pams]) => pams.map(p => ({
-      AllVuePortfolio: av, PAMPortfolio: p,
+    return Object.entries(IAS_PORTFOLIOS).flatMap(([av, iasPorts]) => iasPorts.map(p => ({
+      LoanPortfolio: av, IASPortfolio: p,
       Bank: 'BNK1', BankName: 'Agent Bank', CustodyAccount: String(++acct), CashBank: 'CSH',
     })));
   }
 
-  function pamPositionRows() {
+  function iasPositionRows() {
     const rows = [];
     const counters = {};
     ASSETS.forEach(a => {
       if (a.unmapped) return;
-      const pams = PAM_PORTFOLIOS[a.port];
+      const iasPorts = IAS_PORTFOLIOS[a.port];
       const patterns = SHARE_PATTERNS[a.port];
       const n = counters[a.port] = (counters[a.port] || 0) + 1;
-      const weights = patterns[n % patterns.length].map((w, i) => ({ key: pams[i], weight: w }));
+      const weights = patterns[n % patterns.length].map((w, i) => ({ key: iasPorts[i], weight: w }));
       const funded = E.allocate(E.toCents(a.prior.reduce((s, c) => s + c.amount, 0)), weights);
       const unfunded = E.allocate(E.toCents(a.unfunded ? a.unfunded[0] : 0), weights);
-      if (a.pamBreak) funded[pams[0]] += E.toCents(a.pamBreak);
-      pams.forEach(p => funded[p] + unfunded[p] !== 0 && rows.push({
-        AsOfDate: PRIOR_AS_OF, PAMPortfolio: p, PAMTrancheID: `PT-${a.id.slice(1)}`,
+      if (a.iasBreak) funded[iasPorts[0]] += E.toCents(a.iasBreak);
+      iasPorts.forEach(p => funded[p] + unfunded[p] !== 0 && rows.push({
+        AsOfDate: PRIOR_AS_OF, IASPortfolio: p, IASTrancheID: `PT-${a.id.slice(1)}`,
         Funded: E.fromCents(funded[p]), Unfunded: E.fromCents(unfunded[p]),
       }));
     });
@@ -233,9 +233,9 @@
       const a = ASSETS.find(x => x.id === f.asset && (!f.port || x.port === f.port));
       const period = f.period || FEE_PERIOD;
       return {
-        AllVuePortfolio: a.port, AssetID: a.id, AssetName: a.name, FacilityType: a.fac, FeeType: f.type,
+        LoanPortfolio: a.port, AssetID: a.id, AssetName: a.name, FacilityType: a.fac, FeeType: f.type,
         PeriodStart: period[0], PeriodEnd: period[1], FeeRateBps: String(f.bps), AverageUnfunded: money(f.avg),
-        DayCount: 'ACT/360', Amount: money(f.amount ?? feeAmount(f.avg, f.bps)), AllVueTransactionID: `FT-${++txn}`,
+        DayCount: 'ACT/360', Amount: money(f.amount ?? feeAmount(f.avg, f.bps)), LoanTransactionID: `FT-${++txn}`,
       };
     });
   }
@@ -247,22 +247,22 @@
     ASSETS.forEach(a => a.prior.forEach(c => {
       if (seen.has(c.id)) return;
       seen.add(c.id);
-      rows.push({ AllVueContractID: c.id, PAMContractID: `PC-${++pc}` });
+      rows.push({ LoanContractID: c.id, IASContractID: `PC-${++pc}` });
     }));
     return rows;
   }
 
-  /** The internal sample rows as an AllVue contracts report (made-up IDs). */
+  /** The internal sample rows as a Loan System contracts report (made-up IDs). */
   const FACILITY_NAME = { TL: 'Term Loan', RC: 'Revolver', DDTL: 'Delayed Draw' };
   const PAYMENTS = { Monthly: 12, Quarterly: 4, 'Semi-Annual': 2, Annual: 1 };
-  function toAllVueReport(rows) {
+  function toLoanReport(rows) {
     return rows.map(r => {
       const funded = r.ContractType === 'Funded';
       return {
-        portfolioId: r.AllVuePortfolio, portfolioName: r.PortfolioName,
+        portfolioId: r.LoanPortfolio, portfolioName: r.PortfolioName,
         instrumentId: `INST-${r.AssetID}`, primaryIdentifier: r.AssetID, instrumentName: r.AssetName,
         legalEntityName: r.IssuerName,
-        positionId: `POS-${r.AllVuePortfolio}-${r.AssetID}`, referenceAccrualId: r.ContractID,
+        positionId: `POS-${r.LoanPortfolio}-${r.AssetID}`, referenceAccrualId: r.ContractID,
         accrualType: funded ? 'Funded' : r.FacilityType === 'DDTL' ? 'Delayed Draw Unfunded' : 'Unfunded',
         instrumentSubType: FACILITY_NAME[r.FacilityType],
         baseRateIndexName: funded ? `${r.Tenor} SOFR Term` : '',
@@ -281,18 +281,18 @@
   }
 
   const SampleData = {
-    toAllVueReport,
+    toLoanReport,
     label: 'Sample month-end (fictional data)',
     feeLabel: 'October 2026 fee export (fictional data)',
     asOfDate: AS_OF,
     priorAsOfDate: PRIOR_AS_OF,
     build() {
       return {
-        prior: allvueRows('prior'),
-        current: allvueRows('current'),
+        prior: loanRows('prior'),
+        current: loanRows('current'),
         trancheMap: trancheMapRows(),
         portfolioMap: portfolioMapRows(),
-        pamPositions: pamPositionRows(),
+        iasPositions: iasPositionRows(),
         lineage: lineageRows(),
         fees: feeRows(),
       };
